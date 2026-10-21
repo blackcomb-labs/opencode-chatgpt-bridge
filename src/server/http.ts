@@ -110,6 +110,19 @@ export async function startHttpServer(runtime: BridgeRuntime): Promise<Server> {
   const app = express();
   app.use(hostGuard(config));
   app.use(express.json());
+  // Minimal access log: method/path/status only. Never headers or query values,
+  // so tokens cannot leak into logs.
+  app.use((req, res, next) => {
+    if (!req.path.startsWith("/mcp")) {
+      next();
+      return;
+    }
+    const started = Date.now();
+    res.on("finish", () => {
+      console.log(`[mcp] ${req.method} ${req.path} ${res.statusCode} ${Date.now() - started}ms`);
+    });
+    next();
+  });
 
   app.get("/health", (req, res) => {
     res.setHeader("Cache-Control", "no-store");

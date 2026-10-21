@@ -24,7 +24,8 @@
     "e2e": "node scripts/e2e.mjs",
     "install-service": "node dist/cli.js install-service",
     "uninstall-service": "node dist/cli.js uninstall-service",
-    "service-status": "node dist/cli.js service-status"
+    "service-status": "node dist/cli.js service-status",
+    "selftest": "node scripts/selftest.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

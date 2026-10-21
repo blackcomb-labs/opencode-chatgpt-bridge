@@ -60,6 +60,16 @@ pnpm start
 - `OPENCODE_BRIDGE_ALLOW_QUERY_TOKEN=false` — header auth only
 - `OPENCODE_BRIDGE_ALLOWED_ROOTS` — your colon-separated repo roots
 
+## Start / stop
+
+```bash
+./scripts/bridge-start.sh    # background; PID + logs in ~/.opencode-chatgpt-bridge
+./scripts/bridge-status.sh
+./scripts/bridge-stop.sh
+```
+
+Logs: `~/.opencode-chatgpt-bridge/bridge.log` and `bridge.err.log`. Nothing is installed as a login item; `pnpm run install-service` is opt-in only.
+
 ## Tools
 
 Bridge / project:
@@ -106,17 +116,67 @@ OPENCODE_BRIDGE_ALLOWED_ROOTS=/Users/you/Projects
 OPENCODE_BRIDGE_ALLOWED_ROOTS=/Users/you
 ```
 
-## Connecting ChatGPT
+## Connecting the ChatGPT desktop app (recommended: no tunnel)
 
-ChatGPT connects to **remote HTTPS** MCP servers only, so a tunnel is required even though the bridge stays on `127.0.0.1`.
+The macOS ChatGPT app shares Codex's MCP configuration (`~/.codex/config.toml`), so it connects to a **local** Streamable HTTP server directly. No public URL, no OAuth, no tunnel.
+
+1. Start the bridge (see [Start / stop](#start--stop)) and confirm:
+
+   ```bash
+   ./scripts/bridge-status.sh
+   curl -s http://127.0.0.1:8787/health
+   ```
+
+2. Add the server to `~/.codex/config.toml`. `http_headers_helper` reads the bearer token from the bridge's private `.env`, so the secret never lives in the Codex config:
+
+   ```toml
+   [mcp_servers.opencode_bridge]
+   url = "http://127.0.0.1:8787/mcp"
+   http_headers_helper = "/absolute/path/to/opencode-chatgpt-bridge-v2/scripts/mcp-headers.sh"
+   startup_timeout_sec = 30
+   tool_timeout_sec = 120
+   default_tools_approval_mode = "prompt"
+   enabled = true
+
+   # Reads are pre-approved; everything else still asks a human.
+   [mcp_servers.opencode_bridge.tools.bridge_health]
+   approval_mode = "approve"
+   # ... repeat for opencode_list_sessions, opencode_get_messages, etc.
+   ```
+
+3. Restart the ChatGPT app so it reloads the config (quit from the menu bar, reopen).
+4. Start a chat and ask: *"Ask my OpenCode agent what it's working on."*
+
+| Field | Value |
+|---|---|
+| Name | `opencode_bridge` |
+| Transport | Streamable HTTP |
+| URL | `http://127.0.0.1:8787/mcp` |
+| Authentication | `Authorization: Bearer <OPENCODE_BRIDGE_TOKEN>` via `scripts/mcp-headers.sh` |
+| Approvals | read-only tools pre-approved, write tools prompt every time |
+
+Verify the config without spending model calls:
+
+```bash
+codex mcp get opencode_bridge
+grep '^\[mcp\]' ~/.opencode-chatgpt-bridge/bridge.log | tail
+```
+
+A successful connection logs `initialize` (200), `tools/list` (200) and an SSE `GET` from the app.
+
+## Connecting ChatGPT web or mobile (tunnel fallback)
+
+ChatGPT web only reaches **remote HTTPS** MCP servers, so this path needs a tunnel.
 
 1. `OPENCODE_BRIDGE_TUNNEL=cloudflare pnpm start`, or set it in `.env`.
-2. Wait for the printed `Public MCP: https://<random>.trycloudflare.com/mcp`. Quick-tunnel DNS can take **60–90 s** to resolve; retry before assuming failure.
-3. In ChatGPT: **Settings → Apps & Connectors → Advanced settings → Developer mode**, then **Connectors → Add custom MCP server**.
+2. Wait for `Public MCP: https://<random>.trycloudflare.com/mcp`. Quick-tunnel DNS can take **60-90 s** to resolve; retry before assuming failure.
+3. In ChatGPT: **Settings -> Apps & Connectors -> Advanced settings -> Developer mode**, then **Connectors -> Add custom MCP server**.
 4. URL: the printed `/mcp` URL (no token in the URL).
 5. Auth: header `Authorization: Bearer <OPENCODE_BRIDGE_TOKEN from .env>`.
 
-Prefer Tailscale Funnel or OpenAI Secure MCP Tunnel for anything long-lived: quick-tunnel hostnames are random and rotate on restart.
+Full tool access on chatgpt.com requires a Business/Enterprise workspace; personal plans get read/fetch tools only. That is why the desktop path above is the recommended one.
+
+Prefer Tailscale Funnel or OpenAI Secure MCP Tunnel for anything long-lived: quick-tunnel hostnames rotate on restart.
 
 ## Security model
 
@@ -136,6 +196,7 @@ pnpm run typecheck
 pnpm test            # 19 unit tests
 pnpm run build
 pnpm run e2e         # 27 end-to-end checks over real MCP Streamable HTTP
+node scripts/selftest.mjs       # 13 checks against the installed bridge (uses .env)
 node scripts/tunnel-check.mjs   # optional: HTTPS + Host guard + auth over a quick tunnel
 ```
 
