@@ -126,6 +126,7 @@ async function main(): Promise<void> {
     console.log("Starting Cloudflare quick tunnel...");
     const tunnel = startCloudflareTunnel(config.cloudflaredBin, localUrl);
     publicUrl = await tunnel.url;
+    config.allowedHosts.push(new URL(publicUrl).host);
     process.once("exit", () => tunnel.process.kill("SIGTERM"));
   }
 
@@ -133,6 +134,7 @@ async function main(): Promise<void> {
     console.log("Starting Tailscale Funnel...");
     const tunnel = startTailscaleFunnel(config.tailscaleBin, localUrl);
     publicUrl = await tunnel.url;
+    config.allowedHosts.push(new URL(publicUrl).host);
     process.once("exit", () => tunnel.process.kill("SIGTERM"));
   }
 

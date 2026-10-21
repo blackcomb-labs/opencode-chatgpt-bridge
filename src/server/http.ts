@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import process from "node:process";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
+import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Request, Response, NextFunction } from "express";
 import type { BridgeConfig } from "../types.js";
-import { maskToken } from "../config/env.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
 import { StateStore } from "../state/store.js";
 import { createBridgeMcpServer } from "../mcp/tools.js";
@@ -27,15 +26,7 @@ export function createRuntime(config: BridgeConfig): BridgeRuntime {
 
 function authMiddleware(config: BridgeConfig) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!config.bridgeToken) {
-      next();
-      return;
-    }
-    const header = req.header("authorization") ?? "";
-    const bearer = header.match(/^Bearer\s+(.+)$/i)?.[1];
-    const queryToken = typeof req.query.token === "string" ? req.query.token : undefined;
- const pathToken = typeof req.params.token === "string" ? req.params.token : undefined;
-    if (bearer === config.bridgeToken || queryToken === config.bridgeToken || pathToken === config.bridgeToken) {
+    if (authorized(config, req)) {
       next();
       return;
     }
@@ -43,7 +34,47 @@ function authMiddleware(config: BridgeConfig) {
   };
 }
 
-async function listenWithFallback(app: ReturnType<typeof createMcpExpressApp>, config: BridgeConfig): Promise<Server> {
+function authorized(config: BridgeConfig, req: Request): boolean {
+  if (!config.bridgeToken) return true;
+  const header = req.header("authorization") ?? "";
+  const bearer = header.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (bearer === config.bridgeToken) return true;
+  // Query/path tokens leak into proxy and tunnel logs, so they are opt-in.
+  if (!config.allowQueryToken) return false;
+  const queryToken = typeof req.query.token === "string" ? req.query.token : undefined;
+  const pathToken = typeof req.params.token === "string" ? req.params.token : undefined;
+  return queryToken === config.bridgeToken || pathToken === config.bridgeToken;
+}
+
+/**
+ * DNS-rebinding protection with wildcard support. Tunnel hostnames are random
+ * (Cloudflare quick tunnels) or only known at runtime (Tailscale Funnel), so
+ * exact-match validation from the SDK is too rigid. The allowlist is read on
+ * every request, which lets cli.ts register a tunnel host after boot.
+ */
+function hostGuard(config: BridgeConfig) {
+  const always = new Set(["127.0.0.1", "localhost", "::1"]);
+  return (req: Request, res: Response, next: NextFunction) => {
+    const rawHost = (req.headers.host ?? "").toLowerCase();
+    const host = rawHost.startsWith("[") ? rawHost.slice(0, rawHost.indexOf("]") + 1) : rawHost.split(":")[0] ?? "";
+    if (!host || always.has(host)) {
+      next();
+      return;
+    }
+    const allowed = config.allowedHosts.map((entry) => entry.toLowerCase());
+    const exact = allowed.some((entry) => !entry.startsWith("*.") && entry === host);
+    const suffix = allowed
+      .filter((entry) => entry.startsWith("*."))
+      .some((entry) => host.endsWith(entry.slice(1)));
+    if (exact || suffix) {
+      next();
+      return;
+    }
+    res.status(403).json({ error: "Host header not allowed" });
+  };
+}
+
+async function listenWithFallback(app: ReturnType<typeof express>, config: BridgeConfig): Promise<Server> {
   const preferredPort = config.port;
   const attempts = config.autoPort ? 50 : 1;
   for (let offset = 0; offset < attempts; offset += 1) {
@@ -76,17 +107,28 @@ async function listenWithFallback(app: ReturnType<typeof createMcpExpressApp>, c
 
 export async function startHttpServer(runtime: BridgeRuntime): Promise<Server> {
   const { config } = runtime;
-  const app = createMcpExpressApp({ host: config.host, allowedHosts: config.allowedHosts });
+  const app = express();
+  app.use(hostGuard(config));
+  app.use(express.json());
 
-  app.get("/health", (_req, res) => {
+  app.get("/health", (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    // Public probe: no paths, tokens, or process details.
+    const base = { ok: true, name: "opencode-chatgpt-bridge", version: "0.2.0", opencodeApi: "v2" };
+    if (!authorized(config, req)) {
+      res.json({ ...base, authRequired: true });
+      return;
+    }
     res.json({
-      ok: true,
-      name: "opencode-chatgpt-bridge",
-      mcp: "/mcp",
+      ...base,
       allowedRoots: config.allowedRoots,
       tokenAuthEnabled: Boolean(config.bridgeToken),
-      tokenPreview: maskToken(config.bridgeToken),
-      managedProcesses: runtime.processManager.list()
+      managedProcesses: runtime.processManager.list().map((proc) => ({
+        repoPath: proc.repoPath,
+        baseUrl: proc.baseUrl,
+        port: proc.port ?? null,
+        startedAt: proc.startedAt
+      }))
     });
   });
 

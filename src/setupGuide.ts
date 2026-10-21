@@ -15,33 +15,29 @@ const CHATGPT_CONNECTORS_SETTINGS_URL = "https://chatgpt.com/#settings/Connector
 const OPENAI_CONNECT_DOCS_URL = "https://developers.openai.com/apps-sdk/deploy/connect-chatgpt";
 const OPENCODE_SERVER_DOCS_URL = "https://opencode.ai/docs/server/";
 
-function withTokenInPath(url: string, token?: string): string | undefined {
-  if (!token) return undefined;
-  return `${url}/${encodeURIComponent(token)}`;
-}
-
-function withTokenQuery(url: string, token?: string): string | undefined {
-  if (!token) return undefined;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}token=${encodeURIComponent(token)}`;
-}
-
 export function getSetupGuide({ config, localUrl, publicUrl, opencodeStatus }: SetupGuideInput): string {
   const connectorUrl = publicUrl ? `${publicUrl}/mcp` : `${localUrl}/mcp`;
-  const connectorUrlWithPathToken = withTokenInPath(connectorUrl, config.bridgeToken);
-  const connectorUrlWithQueryToken = withTokenQuery(connectorUrl, config.bridgeToken);
   const accessMode = publicUrl
     ? "READY: use the public HTTPS MCP endpoint below in ChatGPT."
-    : "LOCAL ONLY: ChatGPT needs an HTTPS URL. Start with OPENCODE_BRIDGE_TUNNEL=cloudflare or use ngrok/Tailscale Funnel.";
-  const tokenLine = config.bridgeToken
-    ? `Bearer token: ${maskToken(config.bridgeToken)}\n   Header auth: Authorization: Bearer <your OPENCODE_BRIDGE_TOKEN>\n   Path auth URL: ${connectorUrlWithPathToken}\n   Query auth fallback: ${connectorUrlWithQueryToken}`
-    : "Bearer token: NOT SET\n   Set OPENCODE_BRIDGE_TOKEN before exposing this bridge outside localhost.";
+    : "LOCAL ONLY: ChatGPT needs an HTTPS URL. Enable OPENCODE_BRIDGE_TUNNEL=cloudflare or tailscale when local testing passes.";
+
+  // Never print the token itself. Only a masked preview, and a pointer to .env.
+  const authLines = config.bridgeToken
+    ? [
+        `   Auth: header only -> Authorization: Bearer <OPENCODE_BRIDGE_TOKEN from .env>`,
+        `   Token preview: ${maskToken(config.bridgeToken)} (full value is in .env, chmod 600)`,
+        config.allowQueryToken
+          ? "   Query-token auth: ENABLED (leaks into proxy logs; prefer the header)"
+          : "   Query-token auth: disabled (headers only)"
+      ]
+    : ["   Auth: NOT SET - set OPENCODE_BRIDGE_TOKEN before exposing this bridge outside localhost."];
+
   const opencodeLines = opencodeStatus ? getOpencodeSetupText(opencodeStatus, config) : [];
 
   return [
     "",
     "╭──────────────────────────────────────────────────────────╮",
-    "│ opencode-chatgpt-bridge setup                              │",
+    "│ opencode-chatgpt-bridge setup (opencode v2)                │",
     "╰───────────────────────────────────────────────────────────╯",
     "",
     accessMode,
@@ -49,29 +45,27 @@ export function getSetupGuide({ config, localUrl, publicUrl, opencodeStatus }: S
     "1) Local bridge",
     `   Health: ${localUrl}/health`,
     `   Local MCP: ${localUrl}/mcp`,
-    publicUrl ? `   Public MCP: ${connectorUrl}` : "   Public MCP: not available yet",
+    publicUrl ? `   Public MCP: ${connectorUrl}` : "   Public MCP: not configured",
     `   Allowed roots: ${config.allowedRoots.join(", ")}`,
     "",
     "2) ChatGPT connector settings",
     `   Open ChatGPT: ${CHATGPT_HOME_URL}`,
     `   Direct settings link: ${CHATGPT_CONNECTORS_SETTINGS_URL}`,
     "   Manual path: Settings -> Apps & Connectors -> Advanced settings -> enable Developer mode,",
-    "                then Settings -> Connectors -> Create",
+    "                then Settings -> Connectors -> Add custom MCP server",
     "",
-    "3) Create connector with these values",
-    "   Connector name: opencode local bridge",
-    "   Description: Control local opencode sessions, inspect diffs, and manage local coding tasks.",
-    `   Connector URL: ${connectorUrlWithPathToken ?? connectorUrl}`,
-    config.bridgeToken ? `   Plain MCP URL: ${connectorUrl}` : undefined,
-    `   ${tokenLine}`,
+    "3) Create the connector",
+    "   Name: opencode local bridge",
+    "   Description: Read and drive my local opencode sessions (v2).",
+    `   Connector URL: ${connectorUrl}`,
+    ...authLines,
     "",
-    "4) Suggested first ChatGPT prompt after connecting",
-    "   Use opencode local bridge. First call bridge_health and list_projects.",
-    "   Then create a session for <repo path>, ask opencode to make the requested change,",
-    "   poll status, and show opencode_get_diff before claiming completion.",
+    "4) First prompt to try",
+    '   "Ask my OpenCode agent what it is working on."',
+    '   "Attach to my latest opencode session in <repo> and show the last few messages."',
     "",
     "5) Mobile use",
-    "   Link the connector once from ChatGPT Web. After that, it should appear in ChatGPT mobile tools.",
+    "   Link the connector once from ChatGPT Web; it then appears in the mobile app tools.",
     "",
     ...opencodeLines,
     opencodeLines.length ? "" : undefined,
@@ -80,7 +74,8 @@ export function getSetupGuide({ config, localUrl, publicUrl, opencodeStatus }: S
     `   ${OPENCODE_SERVER_DOCS_URL}`,
     "",
     "Security reminder:",
-    "   Keep allowed roots narrow. Review opencode_get_diff before committing or pushing changes.",
+    "   Keep allowed roots narrow. Diffs are one call away - review them before committing.",
+    "   Permission requests are never auto-approved; a human decides via opencode_respond_permission.",
     ""
   ]
     .filter((line): line is string => line !== undefined)

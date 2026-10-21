@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue } from "../types.js";
-import { listProjects, validateRepoPath } from "../security/paths.js";
+import { isPathWithinRoots, listProjects, validateRepoPath } from "../security/paths.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
 import { StateStore } from "../state/store.js";
 import { safeTool } from "./results.js";
@@ -16,12 +16,17 @@ function json(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
+const MAX_WAIT_MS = 120_000;
+
 export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
   const server = new McpServer(
-    { name: "opencode-chatgpt-bridge", version: "0.1.0" },
+    { name: "opencode-chatgpt-bridge", version: "0.2.0" },
     {
       instructions:
-        "Use this server to control local opencode sessions. Always validate a repo with list_projects or create_session first. Prefer async messages for long work, then poll get_session_status/get_messages and review get_diff before claiming changes are complete."
+        "This server controls local opencode v2 sessions. Start with list_projects, then opencode_list_sessions or opencode_attach_session to work with an existing session, or opencode_create_session for a new one. " +
+        "opencode_send_message is asynchronous by default: it returns an accepted message id immediately. Use opencode_wait_for_completion (bounded) or opencode_get_session_status to detect completion, and pass sinceMessageId to opencode_get_messages so replies are never duplicated. " +
+        "Always review opencode_get_diff before claiming code changes are complete. " +
+        "Never assume a permission request was approved: opencode_list_permissions surfaces pending requests and opencode_respond_permission requires an explicit decision."
     }
   );
 
@@ -29,18 +34,38 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "bridge_health",
     {
       title: "Bridge health",
-      description: "Check the bridge configuration and managed opencode processes.",
+      description: "Check bridge configuration, managed opencode servers, and their v2 API versions.",
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
     async () =>
-      safeTool(async () => ({
-        ok: true,
-        allowedRoots: ctx.config.allowedRoots,
-        opencodeBaseUrl: ctx.config.opencodeBaseUrl ?? null,
-        managedProcesses: json(ctx.processManager.list()),
-        tokenAuthEnabled: Boolean(ctx.config.bridgeToken)
-      }))
+      safeTool(async () => {
+        const processes = await Promise.all(
+          ctx.processManager.list().map(async (proc) => {
+            const client = ctx.processManager.clientFor(proc);
+            const health = await client.health().catch((error: unknown) => ({
+              healthy: false,
+              error: error instanceof Error ? error.message : String(error)
+            }));
+            return {
+              repoPath: proc.repoPath,
+              baseUrl: proc.baseUrl,
+              port: proc.port ?? null,
+              startedAt: proc.startedAt,
+              health: json(health)
+            };
+          })
+        );
+        return {
+          ok: true,
+          bridgeVersion: "0.2.0",
+          opencodeApi: "v2",
+          allowedRoots: ctx.config.allowedRoots,
+          opencodeBaseUrl: ctx.config.opencodeBaseUrl ?? null,
+          managedProcesses: processes,
+          tokenAuthEnabled: Boolean(ctx.config.bridgeToken)
+        };
+      })
   );
 
   server.registerTool(
@@ -58,7 +83,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_start",
     {
       title: "Start opencode server",
-      description: "Start or reuse a local opencode server for a repo path within the allowed roots.",
+      description: "Start or reuse a local opencode v2 server for a repo path within the allowed roots.",
       inputSchema: { repoPath: z.string().min(1) },
       annotations: { readOnlyHint: false, openWorldHint: false }
     },
@@ -87,10 +112,56 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
   );
 
   server.registerTool(
+    "opencode_list_sessions",
+    {
+      title: "List sessions",
+      description:
+        "List bridge sessions, and optionally the real opencode sessions that exist on disk (these are attachable with opencode_attach_session).",
+      inputSchema: {
+        repoPath: z.string().optional(),
+        search: z.string().optional(),
+        limit: z.number().int().min(1).max(100).default(20),
+        includeBridgeSessions: z.boolean().default(true),
+        includeOpencodeSessions: z.boolean().default(true)
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async ({ repoPath, search, limit, includeBridgeSessions, includeOpencodeSessions }) =>
+      safeTool(async () => {
+        const bridgeSessions = includeBridgeSessions ? await ctx.state.listSessions() : [];
+        let opencodeSessions: unknown[] = [];
+        if (includeOpencodeSessions) {
+          const validated = repoPath ? await validateRepoPath(repoPath, ctx.config.allowedRoots) : undefined;
+          const root = validated ?? ctx.config.allowedRoots[0];
+          if (!root) throw new Error("No allowed roots configured");
+          const managed = await ctx.processManager.ensure(root);
+          const client = ctx.processManager.clientFor(managed);
+          const window = Math.min(200, Math.max(limit * 4, 50));
+          opencodeSessions = (await client.listSessions({ limit: window, search, order: "desc" }))
+            // Never advertise sessions from directories the bridge may not touch.
+            .filter((session) => {
+              const directory = session.location?.directory;
+              return Boolean(directory) && isPathWithinRoots(directory as string, ctx.config.allowedRoots);
+            })
+            .slice(0, limit)
+            .map((session) => ({
+              opencodeSessionId: session.id,
+              title: session.title,
+              directory: session.location?.directory,
+              outcome: session.outcome,
+              updatedAt: session.time?.updated,
+              attachable: true
+            }));
+        }
+        return { bridgeSessions: json(bridgeSessions), opencodeSessions: json(opencodeSessions) };
+      })
+  );
+
+  server.registerTool(
     "opencode_create_session",
     {
       title: "Create opencode session",
-      description: "Create an opencode session for a repo. Returns a bridgeSessionId used by other tools.",
+      description: "Create a new opencode v2 session for a repo. Returns a bridgeSessionId used by the other tools.",
       inputSchema: {
         repoPath: z.string().min(1),
         title: z.string().optional(),
@@ -104,34 +175,80 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const managed = await ctx.processManager.ensure(validated);
         const client = ctx.processManager.clientFor(managed);
         const session = await client.createSession(title, parentID);
-        const opencodeSessionId = String(session.id ?? session.ID ?? session.sessionID ?? "");
-        if (!opencodeSessionId) throw new Error(`opencode returned a session without an id: ${JSON.stringify(session)}`);
+        if (!session.id) throw new Error(`opencode returned a session without an id: ${JSON.stringify(session)}`);
         const bridge = await ctx.state.createSession({
-          opencodeSessionId,
+          opencodeSessionId: session.id,
           repoPath: validated,
           baseUrl: managed.baseUrl,
-          title
+          title: title ?? session.title
         });
         return { ok: true, bridgeSession: json(bridge), opencodeSession: json(session) };
       })
   );
 
   server.registerTool(
-    "opencode_list_sessions",
+    "opencode_attach_session",
     {
-      title: "List bridge sessions",
-      description: "List bridge sessions previously created through this MCP server.",
-      inputSchema: {},
-      annotations: { readOnlyHint: true, openWorldHint: false }
+      title: "Attach to existing opencode session",
+      description:
+        "Attach to an existing opencode session (for example the one currently open in the TUI) so ChatGPT can read its history and post follow-up prompts into it. Does not create a new session.",
+      inputSchema: {
+        opencodeSessionId: z.string().min(1),
+        repoPath: z.string().optional(),
+        title: z.string().optional()
+      },
+      annotations: { readOnlyHint: false, openWorldHint: false }
     },
-    async () => safeTool(async () => ({ sessions: json(await ctx.state.listSessions()) }))
+    async ({ opencodeSessionId, repoPath, title }) =>
+      safeTool(async () => {
+        const fallbackRepo = repoPath
+          ? await validateRepoPath(repoPath, ctx.config.allowedRoots)
+          : ctx.config.allowedRoots[0];
+        if (!fallbackRepo) throw new Error("No allowed roots configured");
+        const probe = ctx.processManager.clientFor(await ctx.processManager.ensure(fallbackRepo));
+        const session = await probe.getSession(opencodeSessionId);
+
+        // A session is bound to the directory it was created in. Never fall back
+        // to a different repo: that would expose history from outside the
+        // allowlist and run prompts in the wrong project.
+        const sessionDir = session.location?.directory;
+        let effectiveRepo: string;
+        if (sessionDir) {
+          if (!isPathWithinRoots(sessionDir, ctx.config.allowedRoots)) {
+            throw new Error(`Session ${opencodeSessionId} lives at ${sessionDir}, which is outside the allowed roots.`);
+          }
+          effectiveRepo = await validateRepoPath(sessionDir, ctx.config.allowedRoots);
+        } else {
+          if (!repoPath) throw new Error(`Session ${opencodeSessionId} has no location; pass repoPath explicitly.`);
+          effectiveRepo = await validateRepoPath(repoPath, ctx.config.allowedRoots);
+        }
+
+        const managed = await ctx.processManager.ensure(effectiveRepo);
+        const client = ctx.processManager.clientFor(managed);
+        const verified = await client.getSession(opencodeSessionId);
+
+        const existing = (await ctx.state.listSessions()).find(
+          (item) => item.opencodeSessionId === opencodeSessionId && item.repoPath === effectiveRepo
+        );
+        const bridge =
+          existing ??
+          (await ctx.state.createSession({
+            opencodeSessionId,
+            repoPath: effectiveRepo,
+            baseUrl: managed.baseUrl,
+            title: title ?? verified.title
+          }));
+
+        return { ok: true, attached: true, bridgeSession: json(bridge), opencodeSession: json(verified) };
+      })
   );
 
   server.registerTool(
     "opencode_get_session_status",
     {
       title: "Get opencode session status",
-      description: "Get status for an opencode session or all sessions in that repo.",
+      description:
+        "Get running/idle state, last outcome, last activity, and the number of pending permission requests for a bridge session.",
       inputSchema: { bridgeSessionId: z.string().min(1) },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -140,11 +257,15 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        const statuses = await client.getSessionStatus();
+        const [status, permissions] = await Promise.all([
+          client.getSessionStatus(bridge.opencodeSessionId),
+          client.listPermissions(bridge.opencodeSessionId).catch(() => [])
+        ]);
         return {
           bridgeSession: json(bridge),
-          opencodeStatus: json(statuses[bridge.opencodeSessionId] ?? null),
-          allStatuses: json(statuses)
+          status: json(status),
+          pendingPermissions: json(permissions),
+          pendingPermissionCount: permissions.length
         };
       })
   );
@@ -153,16 +274,14 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_send_message",
     {
       title: "Send opencode message",
-      description: "Send a prompt to an opencode session. Use async=true for long-running coding tasks.",
+      description:
+        "Send a prompt to an opencode session. Returns as soon as opencode accepts it. Set wait=true to block up to timeoutMs for completion.",
       inputSchema: {
         bridgeSessionId: z.string().min(1),
         text: z.string().min(1),
-        async: z.boolean().default(true),
-        providerID: z.string().optional(),
-        modelID: z.string().optional(),
-        agent: z.string().optional(),
-        system: z.string().optional(),
-        noReply: z.boolean().optional()
+        wait: z.boolean().default(false),
+        timeoutMs: z.number().int().min(1000).max(MAX_WAIT_MS).default(60_000),
+        delivery: z.enum(["steer", "queue"]).optional()
       },
       annotations: { readOnlyHint: false, openWorldHint: false }
     },
@@ -171,18 +290,46 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(input.bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        const response = await client.sendMessage({
-          sessionId: bridge.opencodeSessionId,
-          text: input.text,
-          async: input.async,
-          providerID: input.providerID,
-          modelID: input.modelID,
-          agent: input.agent,
-          system: input.system,
-          noReply: input.noReply
-        });
+        const since = Date.now();
+        const accepted = await client.prompt(bridge.opencodeSessionId, input.text, { delivery: input.delivery });
         await ctx.state.updateSession(input.bridgeSessionId, {});
-        return { ok: true, async: input.async, response: json(response ?? null) };
+
+        if (!input.wait) {
+          return { ok: true, accepted: json(accepted ?? null), completion: null };
+        }
+
+        const completion = await client.waitForCompletion(bridge.opencodeSessionId, {
+          since,
+          timeoutMs: input.timeoutMs
+        });
+        return { ok: true, accepted: json(accepted ?? null), completion: json(completion) };
+      })
+  );
+
+  server.registerTool(
+    "opencode_wait_for_completion",
+    {
+      title: "Wait for opencode completion",
+      description:
+        "Poll an opencode session until an idle marker newer than sinceMessageId appears, or the bounded timeout expires. Returns a timedOut flag instead of blocking forever.",
+      inputSchema: {
+        bridgeSessionId: z.string().min(1),
+        sinceMessageId: z.string().optional(),
+        timeoutMs: z.number().int().min(1000).max(MAX_WAIT_MS).default(60_000)
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async ({ bridgeSessionId, sinceMessageId, timeoutMs }) =>
+      safeTool(async () => {
+        const bridge = await ctx.state.getSession(bridgeSessionId);
+        const managed = await ctx.processManager.ensure(bridge.repoPath);
+        const client = ctx.processManager.clientFor(managed);
+        let since = 0;
+        if (sinceMessageId) {
+          const page = await client.getMessages(bridge.opencodeSessionId, { limit: 200 });
+          since = page.messages.find((message) => message.id === sinceMessageId)?.createdAt ?? 0;
+        }
+        return { completion: json(await client.waitForCompletion(bridge.opencodeSessionId, { since, timeoutMs })) };
       })
   );
 
@@ -190,16 +337,39 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_get_messages",
     {
       title: "Get opencode messages",
-      description: "Fetch messages from a bridge session.",
-      inputSchema: { bridgeSessionId: z.string().min(1), limit: z.number().int().min(1).max(200).optional() },
+      description:
+        "Fetch a session transcript (oldest first). Pass sinceMessageId to receive only messages newer than that id, which prevents duplicate replies when polling.",
+      inputSchema: {
+        bridgeSessionId: z.string().min(1),
+        limit: z.number().int().min(1).max(200).default(100),
+        sinceMessageId: z.string().optional(),
+        type: z.string().optional()
+      },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
-    async ({ bridgeSessionId, limit }) =>
+    async ({ bridgeSessionId, limit, sinceMessageId, type }) =>
       safeTool(async () => {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        return { bridgeSession: json(bridge), messages: json(await client.getMessages(bridge.opencodeSessionId, limit)) };
+        const window = sinceMessageId ? Math.min(200, Math.max(limit, 200)) : limit;
+        const page = await client.getMessages(bridge.opencodeSessionId, { limit: window, type });
+
+        let messages = page.messages;
+        let matchedSince = true;
+        if (sinceMessageId) {
+          const index = messages.findIndex((message) => message.id === sinceMessageId);
+          matchedSince = index >= 0;
+          if (index >= 0) messages = messages.slice(index + 1);
+        }
+
+        return {
+          bridgeSession: json(bridge),
+          count: messages.length,
+          matchedSince,
+          cursor: json(page.cursor ?? null),
+          messages: json(messages)
+        };
       })
   );
 
@@ -207,16 +377,26 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_get_diff",
     {
       title: "Get opencode diff",
-      description: "Fetch file diffs for a bridge session. Call this before summarizing completed code work.",
-      inputSchema: { bridgeSessionId: z.string().min(1), messageID: z.string().optional() },
+      description: "Fetch file diffs for a session turn. Call this before summarizing completed code work.",
+      inputSchema: {
+        bridgeSessionId: z.string().min(1),
+        fromMessageId: z.string().optional(),
+        toMessageId: z.string().optional(),
+        context: z.number().int().min(0).max(20).optional()
+      },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
-    async ({ bridgeSessionId, messageID }) =>
+    async ({ bridgeSessionId, fromMessageId, toMessageId, context }) =>
       safeTool(async () => {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        return { bridgeSession: json(bridge), diff: json(await client.getDiff(bridge.opencodeSessionId, messageID)) };
+        const diff = await client.getDiff(bridge.opencodeSessionId, {
+          from: fromMessageId,
+          to: toMessageId,
+          context
+        });
+        return { bridgeSession: json(bridge), files: diff.length, diff: json(diff) };
       })
   );
 
@@ -224,7 +404,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_abort",
     {
       title: "Abort opencode session",
-      description: "Abort a running opencode session.",
+      description: "Interrupt a running opencode session.",
       inputSchema: { bridgeSessionId: z.string().min(1) },
       annotations: { readOnlyHint: false, openWorldHint: false }
     },
@@ -233,7 +413,26 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        return { ok: await client.abortSession(bridge.opencodeSessionId) };
+        return { ok: await client.interrupt(bridge.opencodeSessionId) };
+      })
+  );
+
+  server.registerTool(
+    "opencode_list_permissions",
+    {
+      title: "List pending permissions",
+      description:
+        "List permission requests opencode is waiting on. Nothing is ever approved automatically; a human decision is required.",
+      inputSchema: { bridgeSessionId: z.string().min(1) },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async ({ bridgeSessionId }) =>
+      safeTool(async () => {
+        const bridge = await ctx.state.getSession(bridgeSessionId);
+        const managed = await ctx.processManager.ensure(bridge.repoPath);
+        const client = ctx.processManager.clientFor(managed);
+        const permissions = await client.listPermissions(bridge.opencodeSessionId);
+        return { count: permissions.length, permissions: json(permissions) };
       })
   );
 
@@ -241,21 +440,23 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_respond_permission",
     {
       title: "Respond to opencode permission",
-      description: "Allow or deny an opencode permission request surfaced in the session messages/status.",
+      description:
+        "Answer a pending permission request. Requires an explicit decision; there is no auto-approve path.",
       inputSchema: {
         bridgeSessionId: z.string().min(1),
         permissionId: z.string().min(1),
-        response: z.enum(["allow", "deny", "once", "always"]),
-        remember: z.boolean().default(false)
+        decision: z.enum(["once", "always", "reject"]),
+        message: z.string().optional()
       },
       annotations: { readOnlyHint: false, openWorldHint: false }
     },
-    async ({ bridgeSessionId, permissionId, response, remember }) =>
+    async ({ bridgeSessionId, permissionId, decision, message }) =>
       safeTool(async () => {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        return { ok: await client.respondPermission(bridge.opencodeSessionId, permissionId, response, remember) };
+        const result = await client.replyPermission(bridge.opencodeSessionId, permissionId, decision, message);
+        return { ok: true, decision, result: json(result ?? null) };
       })
   );
 
@@ -263,7 +464,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_read_file",
     {
       title: "Read project file through opencode",
-      description: "Read a file using opencode's server API.",
+      description: "Read a file from the session's project through the opencode filesystem API.",
       inputSchema: { bridgeSessionId: z.string().min(1), path: z.string().min(1) },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -272,7 +473,8 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        return { file: json(await client.readFile(path)) };
+        const content = await client.readFile(path);
+        return { path, bytes: content.length, content };
       })
   );
 
@@ -280,21 +482,21 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_find_files",
     {
       title: "Find project files through opencode",
-      description: "Fuzzy find files in the current opencode project.",
+      description: "Fuzzy find files in the session's project.",
       inputSchema: {
         bridgeSessionId: z.string().min(1),
         query: z.string().min(1),
         limit: z.number().int().min(1).max(200).default(50),
-        directory: z.string().optional()
+        type: z.enum(["file", "directory"]).optional()
       },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
-    async ({ bridgeSessionId, query, limit, directory }) =>
+    async ({ bridgeSessionId, query, limit, type }) =>
       safeTool(async () => {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        return { files: json(await client.findFiles(query, limit, directory)) };
+        return { files: json(await client.findFiles(query, { limit, type })) };
       })
   );
 
@@ -302,7 +504,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_vcs_status",
     {
       title: "Get VCS status",
-      description: "Get opencode VCS and tracked file status for a bridge session.",
+      description: "Get git status for the session's project.",
       inputSchema: { bridgeSessionId: z.string().min(1) },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -311,7 +513,8 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        return { vcs: json(await client.vcs()), files: json(await client.fileStatus()) };
+        const files = await client.vcsStatus();
+        return { files: files.length, status: json(files) };
       })
   );
 
@@ -319,7 +522,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_capabilities",
     {
       title: "List opencode capabilities",
-      description: "List agents, slash commands, and provider/model configuration available in opencode for a bridge session.",
+      description: "List agents, slash commands, providers, and effective config available to opencode for a session.",
       inputSchema: { bridgeSessionId: z.string().min(1) },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -328,33 +531,26 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        const [agents, commands, providers, providerAuth, configProviders] = await Promise.all([
+        const [agents, commands, providers, config] = await Promise.all([
           client.listAgents(),
           client.listCommands(),
           client.listProviders(),
-          client.getProviderAuthMethods(),
-          client.getConfigProviders()
+          client.getConfig()
         ]);
-        return {
-          agents: json(agents),
-          commands: json(commands),
-          providers: json(providers),
-          providerAuth: json(providerAuth),
-          configProviders: json(configProviders)
-        };
+        return { agents: json(agents), commands: json(commands), providers: json(providers), config: json(config) };
       })
   );
 
   // ChatGPT Connector creation can be stricter than raw MCP clients.
- // The current MCP SDK adds experimental task execution metadata to every
- // registerTool() descriptor. We do not use task-augmented execution, so omit
- // it from tools/list for maximum Apps SDK compatibility.
- const registeredTools = (server as unknown as { _registeredTools?: Record<string, { execution?: unknown }> })._registeredTools;
- if (registeredTools) {
- for (const tool of Object.values(registeredTools)) {
- tool.execution = undefined;
- }
- }
+  // The current MCP SDK adds experimental task execution metadata to every
+  // registerTool() descriptor. We do not use task-augmented execution, so omit
+  // it from tools/list for maximum Apps SDK compatibility.
+  const registeredTools = (server as unknown as { _registeredTools?: Record<string, { execution?: unknown }> })._registeredTools;
+  if (registeredTools) {
+    for (const tool of Object.values(registeredTools)) {
+      tool.execution = undefined;
+    }
+  }
 
- return server;
+  return server;
 }

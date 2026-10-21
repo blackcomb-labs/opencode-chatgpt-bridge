@@ -25,6 +25,11 @@ function isInside(parent: string, child: string): boolean {
   return rel === "" || (!rel.startsWith("..") && rel !== ".." && !isAbsolute(rel));
 }
 
+/** Cheap prefix check used for filtering listings before a realpath check. */
+export function isPathWithinRoots(candidate: string, allowedRoots: string[]): boolean {
+  return allowedRoots.some((root) => isInside(resolve(root), resolve(candidate)));
+}
+
 export async function validateRepoPath(repoPath: string, allowedRoots: string[]): Promise<string> {
   const resolvedRepo = await resolveExistingPath(resolve(repoPath));
   await assertDirectory(resolvedRepo);

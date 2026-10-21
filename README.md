@@ -1,77 +1,147 @@
-# opencode-chatgpt-bridge
+# opencode-chatgpt-bridge (v2 port)
 
-A standalone local MCP bridge that lets ChatGPT control `opencode` sessions running on your own computer.
+A local MCP bridge that lets **ChatGPT** read, drive, and review **opencode v2** sessions running on your own machine.
 
-```text
-ChatGPT / ChatGPT Mobile
-  -> HTTPS tunnel
-  -> opencode-chatgpt-bridge /mcp
-  -> local opencode serve
-  -> local repository
+```
+ChatGPT / ChatGPT mobile
+  -> authenticated HTTPS (Cloudflare quick tunnel / Tailscale Funnel / OpenAI tunnel)
+  -> opencode-chatgpt-bridge  /mcp
+  -> local `opencode serve` (v2 API)
+  -> your repo
 ```
 
-This project is intentionally separate from LocalAnt. It is focused only on the ChatGPT <-> opencode bridge use case.
+This is a fork of [yuga-hashimoto/opencode-chatgpt-bridge](https://github.com/yuga-hashimoto/opencode-chatgpt-bridge) ported to the **opencode v2 API**.
 
-## Quick start
+## Why the port was needed
 
-```bash
-git clone https://github.com/yuga-hashimoto/opencode-chatgpt-bridge.git
-cd opencode-chatgpt-bridge
-pnpm install
-pnpm run build
-pnpm run init -- --allowed-roots /Volumes/MOVESPEED/Documents/GitHub
-pnpm start
-```
+The upstream bridge was written against opencode v1. In v2 the API moved under `/api`, responses are wrapped in `{ data: ... }`, and messages are a discriminated union (`user` → `text`, `assistant` → `content[]`, `idle` → `outcome`). Upstream calls like `POST /session` now return the web UI's HTML shell, so every tool failed.
 
-`init` creates a ready-to-use `.env` with a random bridge token, your allowed repo roots, automatic port fallback, and Tailscale Funnel enabled by default.
+What changed here:
 
-When the bridge starts, it prints a setup guide with:
+| v1 (upstream) | v2 (this fork) |
+|---|---|
+| `GET /session` | `GET /api/session` → `{data:[...]}` |
+| `POST /session/{id}/message` | `POST /api/session/{id}/prompt` `{text}` |
+| `POST /session/{id}/prompt_async` | `prompt` + `delivery: steer \| queue` |
+| `POST /session/{id}/abort` | `POST /api/session/{id}/interrupt` |
+| `GET /session/status` | `GET /api/session/active` |
+| `POST /session/{id}/permissions/{id}` | `POST /api/session/{id}/permission/{requestID}/reply` `{decision}` |
+| `GET /file/content`, `/find/file`, `/vcs` | `/api/fs/read/*`, `/api/fs/find`, `/api/vcs/status` |
 
-- local health URL
-- local MCP URL
-- automatic fallback port when the preferred port is already in use
-- public HTTPS MCP URL when tunnel is enabled; Tailscale background service defaults to port 10000 to avoid LocalAnt using 443 and other active Funnel listeners
-- ChatGPT settings link
-- connector name, description, and URL to paste
-- header auth and URL-token fallback
-- opencode CLI status and setup notes
-- first ChatGPT prompt to try
+Preserved from upstream: bearer-token auth, repository allowlist with `realpath` checks, MCP server, tunnel launchers, macOS LaunchAgent, persistent session mapping.
 
 ## Requirements
 
 - Node.js 20+
 - pnpm 10+
-- `opencode` installed and authenticated locally
-- `cloudflared` for the default tunnel flow, or your own HTTPS tunnel
-
-Check opencode:
+- `opencode` **2.x** installed and logged in
+- `cloudflared` (quick tunnel) or Tailscale with HTTPS enabled (optional, for remote access)
 
 ```bash
-opencode --version
-opencode
+opencode --version   # 2.1.x
 ```
 
-Run `opencode` once inside a repo and make sure your model provider is configured before expecting ChatGPT to drive it. The bridge starts `opencode serve` for each repo and talks to it over HTTP. After creating a bridge session, call `opencode_capabilities` from ChatGPT to inspect connected providers, available auth methods, and default model configuration.
-
-## Commands
+## Quick start
 
 ```bash
-opencode-chatgpt-bridge init --allowed-roots /path/to/repos
-opencode-chatgpt-bridge start
-opencode-chatgpt-bridge doctor
-```
+pnpm install
+pnpm run build
 
-From source, use pnpm:
+# write a .env with a random token, local-only defaults, and your repo roots
+pnpm run init -- --allowed-roots /Users/you/Projects
 
-```bash
-pnpm run init -- --allowed-roots /path/to/repos
 pnpm start
-pnpm run doctor
 ```
 
-## Background mode on macOS
+`init` creates `.env` (mode `600`) with:
 
-You do not need to keep a terminal open. Install the bridge as a user LaunchAgent:
+- `OPENCODE_BRIDGE_TOKEN` — random, 64 hex chars
+- `OPENCODE_BRIDGE_TUNNEL=none` — local testing default
+- `OPENCODE_BRIDGE_ALLOW_QUERY_TOKEN=false` — header auth only
+- `OPENCODE_BRIDGE_ALLOWED_ROOTS` — your colon-separated repo roots
+
+## Tools
+
+Bridge / project:
+
+- `bridge_health` — config, managed opencode servers, v2 version
+- `list_projects` — git repos under the allowed roots
+
+Session lifecycle:
+
+- `opencode_start` / `opencode_stop` — manage the per-repo `opencode serve` process
+- `opencode_list_sessions` — bridge sessions **and** real opencode sessions (filtered to allowed roots)
+- `opencode_create_session` — new v2 session + bridge id
+- `opencode_attach_session` — **attach to an existing session** (e.g. the one in your TUI); no new session created
+
+Talking:
+
+- `opencode_send_message` — accepts immediately; `wait=true` blocks up to `timeoutMs`
+- `opencode_wait_for_completion` — bounded poll (max 120 s), returns `timedOut` instead of hanging
+- `opencode_get_messages` — oldest-first transcript; `sinceMessageId` returns only newer messages (no duplicates when polling)
+- `opencode_get_session_status` — running/idle, last outcome, pending permissions
+
+Review:
+
+- `opencode_get_diff` — per-turn diff
+- `opencode_vcs_status`, `opencode_read_file`, `opencode_find_files`
+- `opencode_capabilities` — agents, commands, providers, config
+
+Permissions:
+
+- `opencode_list_permissions` — what opencode is waiting on
+- `opencode_respond_permission` — explicit `once | always | reject`. There is no auto-approve path.
+
+## Attaching to your real session
+
+opencode records a session's `location.directory` as the directory you launched it from, **not** the repo you edited. If you usually run `opencode` from your home directory, your sessions live at `~`, and `~/Projects` alone will not let ChatGPT see them.
+
+`opencode_attach_session` deliberately refuses to re-home a session: if a session's directory is outside the allowlist, the call fails instead of silently using a different repo.
+
+```jsonc
+// narrow: only repos started inside ~/Projects are visible
+OPENCODE_BRIDGE_ALLOWED_ROOTS=/Users/you/Projects
+
+// broad: matches sessions started from home (larger blast radius)
+OPENCODE_BRIDGE_ALLOWED_ROOTS=/Users/you
+```
+
+## Connecting ChatGPT
+
+ChatGPT connects to **remote HTTPS** MCP servers only, so a tunnel is required even though the bridge stays on `127.0.0.1`.
+
+1. `OPENCODE_BRIDGE_TUNNEL=cloudflare pnpm start`, or set it in `.env`.
+2. Wait for the printed `Public MCP: https://<random>.trycloudflare.com/mcp`. Quick-tunnel DNS can take **60–90 s** to resolve; retry before assuming failure.
+3. In ChatGPT: **Settings → Apps & Connectors → Advanced settings → Developer mode**, then **Connectors → Add custom MCP server**.
+4. URL: the printed `/mcp` URL (no token in the URL).
+5. Auth: header `Authorization: Bearer <OPENCODE_BRIDGE_TOKEN from .env>`.
+
+Prefer Tailscale Funnel or OpenAI Secure MCP Tunnel for anything long-lived: quick-tunnel hostnames are random and rotate on restart.
+
+## Security model
+
+- `opencode serve` binds `127.0.0.1` only; only the bridge is exposed.
+- Bearer token required on `/mcp` and on `/health` details.
+- Query-token (`?token=`) and path-token auth are **off by default** because URLs end up in tunnel logs.
+- Host headers are validated (exact + `*.domain`) to keep DNS-rebinding protection while allowing tunnels.
+- Repos must resolve under `OPENCODE_BRIDGE_ALLOWED_ROOTS`; sessions outside it are neither listed nor attachable.
+- File reads reject `..` traversal.
+- Diffs are first-class: review before committing.
+- Permission requests are surfaced, never auto-approved.
+
+## Testing
+
+```bash
+pnpm run typecheck
+pnpm test            # 19 unit tests
+pnpm run build
+pnpm run e2e         # 27 end-to-end checks over real MCP Streamable HTTP
+node scripts/tunnel-check.mjs   # optional: HTTPS + Host guard + auth over a quick tunnel
+```
+
+The e2e suite boots a throwaway git repo, starts the bridge, spawns `opencode serve`, and exercises round-trips, multi-turn context, attach, incremental polling, bounded waits, diffs, permissions, and path-escape rejection.
+
+## macOS background service
 
 ```bash
 pnpm run build
@@ -79,148 +149,14 @@ pnpm run install-service
 pnpm run service-status
 ```
 
-Logs are written to:
+Logs: `~/.opencode-chatgpt-bridge/bridge.log` and `bridge.err.log`.
 
-```text
-~/.opencode-chatgpt-bridge/bridge.log
-~/.opencode-chatgpt-bridge/bridge.err.log
-```
+## Known limitations
 
-To stop background mode:
-
-```bash
-pnpm run uninstall-service
-```
-
-The service uses this repository directory as its working directory, loads `.env`, starts the bridge, and keeps it alive after login.
-
-## ChatGPT setup
-
-Open ChatGPT Web and go to:
-
-```text
-https://chatgpt.com/#settings/Connectors
-```
-
-Manual path:
-
-```text
-Settings -> Apps & Connectors -> Advanced settings -> enable Developer mode
-Settings -> Connectors -> Create
-```
-
-Use the values printed by the bridge. They look like this:
-
-```text
-Connector name: opencode local bridge
-Description: Control local opencode sessions, inspect diffs, and manage local coding tasks.
-Connector URL: https://example.trycloudflare.com/mcp?token=<generated-token>
-```
-
-If your ChatGPT connector UI supports auth headers, you can use the plain `/mcp` URL and set:
-
-```text
-Authorization: Bearer <OPENCODE_BRIDGE_TOKEN>
-```
-
-If not, use the printed `?token=` URL fallback.
-
-Once linked on ChatGPT Web, the connector should be available in ChatGPT mobile apps as well.
-
-## opencode setup
-
-No extra opencode project configuration is required by the bridge, but opencode itself must be usable locally.
-
-The bridge starts opencode like this:
-
-```bash
-OPENCODE_SERVER_USERNAME=opencode \
-OPENCODE_SERVER_PASSWORD=<generated-or-env-password> \
-opencode serve --hostname 127.0.0.1 --port <auto>
-```
-
-Notes:
-
-- If `OPENCODE_SERVER_PASSWORD` is not set, the bridge generates a random password per managed opencode server.
-- If `OPENCODE_BASE_URL` is set, the bridge uses that existing opencode server instead of spawning one.
-- The opencode server is kept on `127.0.0.1`; only the bridge is exposed to ChatGPT.
-- Provider/model login is handled by opencode. Run `opencode` in a terminal first and confirm it can answer/edit before using ChatGPT.
-
-## Features
-
-- Streamable HTTP MCP endpoint at `/mcp` for ChatGPT connectors and MCP clients.
-- Per-repository `opencode serve` process management.
-- Safe repository allow-listing with realpath checks.
-- Bridge bearer token for exposed/tunneled use.
-- URL-token fallback for connector UIs that do not support custom headers.
-- Persistent bridge session mapping in `~/.opencode-chatgpt-bridge/sessions.json`.
-- Tools for session creation, async prompts, polling, message retrieval, diff review, abort, permission responses, file reads, file search, VCS status, agents, slash commands, and provider/model diagnostics.
-- Optional Cloudflare quick tunnel launcher.
-- TypeScript, strict typecheck, and unit tests.
-
-## MCP tools
-
-### Bridge and project tools
-
-- `bridge_health` - inspect bridge config and managed opencode processes.
-- `list_projects` - list Git repos under the allowed roots.
-
-### opencode process/session tools
-
-- `opencode_start` - start or reuse an `opencode serve` process for a repo.
-- `opencode_stop` - stop one or all managed opencode servers.
-- `opencode_create_session` - create a new opencode session and return a `bridgeSessionId`.
-- `opencode_list_sessions` - list bridge sessions known to this bridge.
-- `opencode_get_session_status` - poll status for a session.
-- `opencode_send_message` - send a prompt; defaults to async mode.
-- `opencode_get_messages` - fetch session transcript/messages.
-- `opencode_get_diff` - fetch file diffs for a session.
-- `opencode_abort` - abort a running session.
-- `opencode_respond_permission` - respond to opencode permission prompts.
-
-### project inspection tools
-
-- `opencode_read_file` - read a file through opencode.
-- `opencode_find_files` - fuzzy-find files through opencode.
-- `opencode_vcs_status` - get VCS and file status.
-- `opencode_capabilities` - list opencode agents, slash commands, providers, auth methods, and default model config.
-
-## Example ChatGPT prompt
-
-```text
-Use opencode local bridge. First call bridge_health and list_projects.
-Then create a session for /Volumes/MOVESPEED/Documents/GitHub/my-repo,
-ask opencode to fix the README, poll status, and show opencode_get_diff.
-```
-
-## Security model
-
-This bridge can cause local code modifications through opencode. Treat it as a local automation gateway.
-
-Default protections:
-
-- `opencode` itself is bound to `127.0.0.1`.
-- Repositories must be under `OPENCODE_BRIDGE_ALLOWED_ROOTS`.
-- The bridge supports bearer-token authentication and URL-token fallback.
-- No arbitrary shell execution tool is exposed by this bridge.
-- Diffs are first-class so clients can inspect changes before committing.
-
-Strongly recommended:
-
-- Always set `OPENCODE_BRIDGE_TOKEN` before exposing through any tunnel.
-- Do not bind the bridge to `0.0.0.0` unless you know exactly what network can reach it.
-- Keep `OPENCODE_BRIDGE_ALLOWED_ROOTS` narrow.
-- Review `opencode_get_diff` before committing or pushing generated changes.
-
-## Development
-
-```bash
-pnpm install
-pnpm run typecheck
-pnpm test
-pnpm run build
-pnpm run validate
-```
+- The v2 HTTP API is young; response shapes can change between minor releases.
+- Completion is detected via `idle` markers, not server-sent events.
+- No streaming: ChatGPT polls with `sinceMessageId`.
+- One composer per session: bridged prompts and your own typing in the same TUI session will interleave.
 
 ## License
 

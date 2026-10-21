@@ -21,6 +21,12 @@ describe("loadConfig", () => {
     expect(config.allowedRoots).toContain("/var/tmp");
     expect(config.bridgeToken).toBe("secret-token");
     expect(config.tunnel).toBe("cloudflare");
+    expect(config.allowQueryToken).toBe(false);
+  });
+
+  it("allows opting into query-token auth", () => {
+    const config = loadConfig(["--allowed-roots", "/tmp", "--allow-query-token"]);
+    expect(config.allowQueryToken).toBe(true);
   });
 
   it("masks tokens", () => {
