@@ -196,13 +196,13 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     {
       title: "Attach to existing opencode session",
       description:
-        "Attach to an existing opencode session (for example the one currently open in the TUI) so ChatGPT can read its history and post follow-up prompts into it. Does not create a new session.",
+        "Attach to an existing opencode session (for example the one currently open in the TUI) so ChatGPT can read its history and post follow-up prompts into it. Does not create a new session and does not change the session itself; it only records a local mapping.",
       inputSchema: {
         opencodeSessionId: z.string().min(1),
         repoPath: z.string().optional(),
         title: z.string().optional()
       },
-      annotations: { readOnlyHint: false, openWorldHint: false }
+      annotations: { readOnlyHint: true, openWorldHint: false }
     },
     async ({ opencodeSessionId, repoPath, title }) =>
       safeTool(async () => {

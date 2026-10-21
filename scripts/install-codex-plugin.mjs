@@ -33,6 +33,7 @@ const READ_ONLY_TOOLS = [
   "bridge_health",
   "list_projects",
   "opencode_list_sessions",
+  "opencode_attach_session",
   "opencode_get_session_status",
   "opencode_get_messages",
   "opencode_get_diff",
