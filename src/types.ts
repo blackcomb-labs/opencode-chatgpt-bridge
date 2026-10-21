@@ -16,6 +16,10 @@ export type BridgeConfig = {
   opencodeUseService: boolean;
   /** Model applied to newly created sessions, as "provider/model" or "provider/model#variant". */
   opencodeDefaultModel?: string;
+  /** Session ids or titles a coordinator may inspect (read-only). */
+  coordinatorSessions: string[];
+  /** Allow a coordinator to inspect any session. Off by default. */
+  coordinatorAllowAll: boolean;
   opencodeBin: string;
   opencodeHost: string;
   opencodePortStart: number;

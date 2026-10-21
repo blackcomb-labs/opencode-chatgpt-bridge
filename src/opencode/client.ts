@@ -13,6 +13,8 @@ export type OpencodeClientOptions = {
   password?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** service.json of the opencode background service (authoritative run state). */
+  serviceConfigPath?: string;
 };
 
 export type ListSessionsOptions = {
@@ -68,9 +70,11 @@ export class OpencodeClient {
   private readonly password?: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly serviceConfigPath?: string;
 
   constructor(options: OpencodeClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.serviceConfigPath = options.serviceConfigPath;
     this.username = options.username ?? "opencode";
     this.password = options.password;
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -218,6 +222,41 @@ export class OpencodeClient {
     return await this.requestData<OpencodeSession>("PATCH", `/api/session/${encodeURIComponent(sessionId)}`, {
       body: { title }
     });
+  }
+
+  /**
+   * Sessions the opencode *background service* reports as running.
+   *
+   * The bridge usually spawns its own server, and that server does not know
+   * which sessions another server is working on. The background service is the
+   * one that owns the user's live sessions, so it is the authority for run
+   * state.
+   */
+  async serviceActiveSessions(): Promise<Record<string, { type: string }> | undefined> {
+    if (!this.serviceConfigPath) return undefined;
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const raw = await readFile(this.serviceConfigPath, "utf8");
+      const service = JSON.parse(raw) as { url?: string; password?: string };
+      if (!service.url || !service.password) return undefined;
+      const auth = Buffer.from(`opencode:${service.password}`).toString("base64");
+      const response = await this.fetchImpl(`${service.url.replace(/\/+$/, "")}/api/session/active`, {
+        headers: { Authorization: `Basic ${auth}` }
+      });
+      if (!response.ok) return undefined;
+      const payload = (await response.json()) as { data?: Record<string, { type: string }> };
+      return payload.data ?? {};
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Verified running state - never inferred from message content. */
+  async isSessionRunning(sessionId: string): Promise<boolean> {
+    const service = await this.serviceActiveSessions();
+    if (service) return service[sessionId]?.type === "running";
+    const local = await this.activeSessions().catch(() => ({}) as Record<string, { type: string }>);
+    return local[sessionId]?.type === "running";
   }
 
   async activeSessions(): Promise<Record<string, { type: string }>> {

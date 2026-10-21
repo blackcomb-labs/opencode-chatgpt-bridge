@@ -85,6 +85,8 @@ export function loadConfig(argv = process.argv.slice(2)): BridgeConfig {
     opencodeBaseUrl: pick(args, "opencode-url", "OPENCODE_BASE_URL"),
     opencodeUseService: pickBoolean(args, "opencode-use-service", "OPENCODE_BRIDGE_USE_SERVICE", false),
     opencodeDefaultModel: pick(args, "opencode-default-model", "OPENCODE_BRIDGE_DEFAULT_MODEL"),
+    coordinatorSessions: parseList(pick(args, "coordinator-sessions", "OPENCODE_BRIDGE_COORDINATOR_SESSIONS"), []),
+    coordinatorAllowAll: pickBoolean(args, "coordinator-allow-all", "OPENCODE_BRIDGE_COORDINATOR_ALLOW_ALL", false),
     opencodeServiceConfig: resolve(
       pick(args, "opencode-service-config", "OPENCODE_BRIDGE_SERVICE_CONFIG") ??
         join(homedir(), ".local/state/opencode/service.json")

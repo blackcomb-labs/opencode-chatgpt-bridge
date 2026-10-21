@@ -3,6 +3,8 @@ import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue } from "../types.js";
 import { isPathWithinRoots, listProjects, validateRepoPath } from "../security/paths.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
+import { SessionRegistry } from "../opencode/registry.js";
+import { buildSessionReport, isAllowed, resolveSession } from "../opencode/report.js";
 import { StateStore } from "../state/store.js";
 import { safeTool } from "./results.js";
 
@@ -348,17 +350,18 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         bridgeSessionId: z.string().min(1),
         limit: z.number().int().min(1).max(200).default(100),
         sinceMessageId: z.string().optional(),
-        type: z.string().optional()
+        type: z.string().optional(),
+        cursor: z.string().optional()
       },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
-    async ({ bridgeSessionId, limit, sinceMessageId, type }) =>
+    async ({ bridgeSessionId, limit, sinceMessageId, type, cursor }) =>
       safeTool(async () => {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
         const window = sinceMessageId ? Math.min(200, Math.max(limit, 200)) : limit;
-        const page = await client.getMessages(bridge.opencodeSessionId, { limit: window, type });
+        const page = await client.getMessages(bridge.opencodeSessionId, { limit: window, type, cursor });
 
         let messages = page.messages;
         let matchedSince = true;
@@ -546,6 +549,131 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
           client.getConfig()
         ]);
         return { agents: json(agents), commands: json(commands), providers: json(providers), config: json(config) };
+      })
+  );
+
+  const coordinatorOptions = {
+    allowlist: ctx.config.coordinatorSessions,
+    allowAll: ctx.config.coordinatorAllowAll,
+    historyLimit: 100,
+    maxTextChars: 2000
+  };
+
+  server.registerTool(
+    "opencode_session_registry",
+    {
+      title: "Discover opencode sessions",
+      description:
+        "Read-only. Lists the OpenCode sessions that exist on this machine with their real ids, titles, working directories, accessibility and verified running state, and records them so a name can later be resolved to the same session.",
+      inputSchema: {
+        refresh: z.boolean().default(true),
+        limit: z.number().int().min(1).max(200).default(100),
+        includeNotAllowed: z.boolean().default(false)
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async ({ refresh, limit, includeNotAllowed }) =>
+      safeTool(async () => {
+        const managed = await ctx.processManager.ensure(ctx.config.allowedRoots[0] ?? process.cwd());
+        const client = ctx.processManager.clientFor(managed);
+        const registry = new SessionRegistry(ctx.config.stateDir);
+        const sessions = refresh ? await client.listSessions({ limit }) : [];
+        const running = (await client.serviceActiveSessions()) ?? (await client.activeSessions().catch(() => ({})));
+        await registry.upsert(
+          sessions.map((session) => ({
+            id: session.id,
+            title: session.title ?? "",
+            directory: session.location?.directory ?? "",
+            createdAt: session.time?.created ?? 0,
+            updatedAt: session.time?.updated ?? 0,
+            firstSeenAt: Date.now(),
+            lastSeenAt: Date.now(),
+            accessible: true,
+            running: (running as Record<string, { type?: string }>)[session.id]?.type === "running"
+          }))
+        );
+        const known: Awaited<ReturnType<SessionRegistry["list"]>> = await registry.list();
+        const visible = known.filter(
+          (entry) => includeNotAllowed || isAllowed(coordinatorOptions, entry.id, entry.title)
+        );
+        return {
+          count: visible.length,
+          known: known.length,
+          allowlist: ctx.config.coordinatorSessions,
+          sessions: json(
+            visible.map((entry) => ({
+              id: entry.id,
+              title: entry.title,
+              directory: entry.directory,
+              updatedAt: entry.updatedAt,
+              lastMessageAt: entry.lastMessageAt,
+              running: entry.running,
+              accessible: entry.accessible,
+              allowed: isAllowed(coordinatorOptions, entry.id, entry.title)
+            }))
+          )
+        };
+      })
+  );
+
+  server.registerTool(
+    "opencode_session_report",
+    {
+      title: "Report on an opencode session",
+      description:
+        "Read-only. Resolves a session by id or exact name and reports its verified running state, last completed work, current task, recent errors, pending permissions and the latest messages. It never writes to the session, never opens its window and never approves anything.",
+      inputSchema: {
+        session: z.string().min(1),
+        historyLimit: z.number().int().min(1).max(200).default(100),
+        includeHistory: z.boolean().default(false)
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async ({ session, historyLimit, includeHistory }) =>
+      safeTool(async () => {
+        const managed = await ctx.processManager.ensure(ctx.config.allowedRoots[0] ?? process.cwd());
+        const client = ctx.processManager.clientFor(managed);
+        const registry = new SessionRegistry(ctx.config.stateDir);
+        const sessions = await client.listSessions({ limit: 200 });
+        const resolution = resolveSession(
+          sessions.map((item) => ({ id: item.id, title: item.title, location: item.location })),
+          session
+        );
+        if (!resolution.ok) {
+          return {
+            ok: false as const,
+            error: resolution.reason,
+            candidates: json(resolution.candidates ?? []),
+            sessionId: "",
+            allowlist: [] as string[],
+            report: null
+          };
+        }
+        const report = await buildSessionReport(
+          client,
+          registry,
+          { ...coordinatorOptions, historyLimit },
+          resolution.sessionId,
+          includeHistory
+        );
+        if (!report.allowed) {
+          return {
+            ok: false as const,
+            error: "that session is not in the coordinator allowlist",
+            candidates: null,
+            sessionId: report.resolved.id,
+            allowlist: ctx.config.coordinatorSessions,
+            report: null
+          };
+        }
+        return {
+          ok: true as const,
+          error: "",
+          candidates: null,
+          sessionId: report.resolved.id,
+          allowlist: ctx.config.coordinatorSessions,
+          report: json(report)
+        };
       })
   );
 
