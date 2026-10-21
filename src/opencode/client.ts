@@ -348,12 +348,39 @@ export class OpencodeClient {
   }
 }
 
-/** Rejects traversal attempts before they ever reach opencode. */
+/**
+ * Credential locations that must not be readable through the bridge even when
+ * the project root is a home directory. The agent itself may still use them;
+ * this blocks ChatGPT from asking the bridge to read them directly.
+ */
+const SENSITIVE_PATH_PREFIXES = [
+  ".ssh/",
+  ".aws/",
+  ".gnupg/",
+  ".kube/",
+  ".password-store/",
+  ".config/gcloud/",
+  ".config/gh/",
+  ".docker/config.json",
+  ".netrc",
+  ".codex/auth.json",
+  ".local/share/opencode/auth.json",
+  "library/keychains/"
+];
+
+/** Rejects traversal and credential paths before they ever reach opencode. */
 export function sanitizeRelativePath(path: string): string {
   const trimmed = path.replace(/^\.\/+/, "").replace(/^\/+/, "");
   const segments = trimmed.split("/");
   if (!trimmed || segments.some((segment) => segment === "..")) {
     throw new Error(`Refusing to read a path outside the project: ${path}`);
+  }
+  const normalized = trimmed.toLowerCase().replace(/^\.\//, "");
+  const sensitive = SENSITIVE_PATH_PREFIXES.some(
+    (prefix) => normalized === prefix.replace(/\/$/, "") || normalized.startsWith(prefix)
+  );
+  if (sensitive) {
+    throw new Error(`Refusing to read a credential path: ${path}`);
   }
   return trimmed;
 }

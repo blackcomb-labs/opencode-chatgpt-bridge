@@ -94,6 +94,9 @@ describe("OpencodeClient v2", () => {
     expect(() => sanitizeRelativePath("../../etc/passwd")).toThrow(/outside the project/);
     expect(() => sanitizeRelativePath("/../etc/passwd")).toThrow(/outside the project/);
     expect(sanitizeRelativePath("./src/index.ts")).toBe("src/index.ts");
+    expect(() => sanitizeRelativePath(".ssh/id_rsa")).toThrow(/credential path/);
+    expect(() => sanitizeRelativePath("Library/Keychains/login.keychain-db")).toThrow(/credential path/);
+    expect(sanitizeRelativePath("src/.env.example")).toBe("src/.env.example");
   });
 
   it("maps permission replies to the v2 decision enum", async () => {
