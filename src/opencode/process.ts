@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { ChildProcess, spawn } from "node:child_process";
 import net from "node:net";
 import type { BridgeConfig } from "../types.js";
@@ -26,7 +27,44 @@ export class OpencodeProcessManager {
 
   constructor(private readonly config: BridgeConfig) {}
 
+  /**
+   * Prefer the opencode background service that is already running on this
+   * machine. It is the same process that runs the user's live TUI sessions, so
+   * attaching to a session means talking to the agent that owns it instead of
+   * starting a second, competing server.
+   */
+  private resolveServiceTarget(): { baseUrl: string; username: string; password: string } | undefined {
+    if (!this.config.opencodeUseService) return undefined;
+    const file = this.config.opencodeServiceConfig;
+    if (!file || !existsSync(file)) return undefined;
+    let data: { url?: string; password?: string };
+    try {
+      data = JSON.parse(readFileSync(file, "utf8")) as { url?: string; password?: string };
+    } catch {
+      return undefined;
+    }
+    if (!data?.url) return undefined;
+    if (this.config.opencodeBaseUrl && this.config.opencodeBaseUrl.replace(/\/$/, "") !== data.url.replace(/\/$/, "")) {
+      return undefined; // an explicit base url overrides the service
+    }
+    const password = this.config.opencodePassword ?? data.password;
+    if (!password) return undefined;
+    return { baseUrl: data.url.replace(/\/$/, ""), username: this.config.opencodeUsername, password };
+  }
+
   async ensure(repoPath: string): Promise<ManagedOpencode> {
+    const service = this.resolveServiceTarget();
+    if (service) {
+      const managed: ManagedOpencode = {
+        repoPath,
+        baseUrl: service.baseUrl,
+        username: service.username,
+        password: service.password,
+        startedAt: new Date().toISOString()
+      };
+      if (await this.isHealthy(managed)) return managed;
+    }
+
     if (this.config.opencodeBaseUrl) {
       return {
         repoPath,
@@ -100,8 +138,30 @@ export class OpencodeProcessManager {
     return { stopped };
   }
 
+  /** Redacted view for display. Never use this to build a client. */
   list(): ManagedOpencode[] {
     return [...this.processes.values()].map((proc) => ({ ...proc, password: proc.password ? "***" : undefined }));
+  }
+
+  /** Live entries, including the real password. Use for client construction. */
+  live(): ManagedOpencode[] {
+    return [...this.processes.values()];
+  }
+
+  /** Kill every managed opencode server. Called on bridge shutdown. */
+  async shutdown(): Promise<void> {
+    const entries = [...this.processes.entries()];
+    this.processes.clear();
+    for (const [, managed] of entries) {
+      const child = managed.process;
+      if (!child || child.killed || child.exitCode !== null) continue;
+      child.kill("SIGTERM");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    for (const [, managed] of entries) {
+      const child = managed.process;
+      if (child && child.exitCode === null) child.kill("SIGKILL");
+    }
   }
 
   getLogs(repoPath: string): LogLine[] {

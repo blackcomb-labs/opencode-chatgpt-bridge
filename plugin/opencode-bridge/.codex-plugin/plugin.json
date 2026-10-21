@@ -1,0 +1,34 @@
+{
+  "name": "opencode-bridge",
+  "version": "0.2.0",
+  "description": "Talk to the opencode v2 sessions running on this Mac: list them, attach to the one in progress, read its history, send follow-up prompts, and review diffs.",
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "author": {
+    "name": "overlordxrz-source"
+  },
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "agent",
+    "sessions",
+    "local",
+    "developer-tools"
+  ],
+  "interface": {
+    "displayName": "OpenCode Bridge",
+    "shortDescription": "Talk to your local OpenCode agent",
+    "longDescription": "Connects ChatGPT to the opencode v2 sessions running on this Mac. List existing sessions, attach to the one already in progress instead of starting a new one, read its transcript, post follow-up instructions into the same session, poll for completion, and review diffs. Permission requests are surfaced for a human decision and are never auto-approved.",
+    "developerName": "Local",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Ask my OpenCode agent what it's working on",
+      "Read the latest messages from my existing OpenCode session",
+      "Tell my OpenCode agent to investigate this and report back"
+    ]
+  }
+}

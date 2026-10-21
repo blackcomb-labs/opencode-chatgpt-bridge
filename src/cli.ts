@@ -139,6 +139,17 @@ async function main(): Promise<void> {
   }
 
   console.log(getSetupGuide({ config, localUrl, publicUrl, opencodeStatus }));
+
+  // Never leave orphaned `opencode serve` processes behind.
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await runtime.processManager.shutdown().catch(() => undefined);
+    process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 }
 
 main().catch((error) => {

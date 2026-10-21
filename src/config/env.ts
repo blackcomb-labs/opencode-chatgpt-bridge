@@ -83,6 +83,12 @@ export function loadConfig(argv = process.argv.slice(2)): BridgeConfig {
     bridgeToken: pick(args, "token", "OPENCODE_BRIDGE_TOKEN"),
     allowQueryToken: pickBoolean(args, "allow-query-token", "OPENCODE_BRIDGE_ALLOW_QUERY_TOKEN", false),
     opencodeBaseUrl: pick(args, "opencode-url", "OPENCODE_BASE_URL"),
+    opencodeUseService: pickBoolean(args, "opencode-use-service", "OPENCODE_BRIDGE_USE_SERVICE", false),
+    opencodeDefaultModel: pick(args, "opencode-default-model", "OPENCODE_BRIDGE_DEFAULT_MODEL"),
+    opencodeServiceConfig: resolve(
+      pick(args, "opencode-service-config", "OPENCODE_BRIDGE_SERVICE_CONFIG") ??
+        join(homedir(), ".local/state/opencode/service.json")
+    ),
     opencodeBin: pick(args, "opencode-bin", "OPENCODE_BIN", "opencode") ?? "opencode",
     opencodeHost: pick(args, "opencode-host", "OPENCODE_BRIDGE_OPENCODE_HOST", "127.0.0.1") ?? "127.0.0.1",
     opencodePortStart: pickNumber(args, "opencode-port-start", "OPENCODE_BRIDGE_OPENCODE_PORT_START", 4096),

@@ -48,7 +48,7 @@ function payload(result) {
 }
 
 async function call(client, name, args = {}) {
-  const result = await client.callTool({ name, arguments: args });
+  const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 300_000 });
   return payload(result);
 }
 
@@ -85,7 +85,11 @@ const bridge = spawn(
     "--opencode-port-start",
     "4210"
   ],
-  { stdio: ["ignore", "pipe", "pipe"] }
+  {
+    stdio: ["ignore", "pipe", "pipe"],
+    // Hermetic: ignore a repo .env that points at the user's opencode service.
+    env: { ...process.env, OPENCODE_BASE_URL: "", OPENCODE_SERVER_PASSWORD: "", OPENCODE_BRIDGE_SERVICE_CONFIG: "/nonexistent" }
+  }
 );
 
 let bridgeLog = "";

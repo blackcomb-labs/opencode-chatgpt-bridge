@@ -41,7 +41,8 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     async () =>
       safeTool(async () => {
         const processes = await Promise.all(
-          ctx.processManager.list().map(async (proc) => {
+          // live() keeps the real password; list() redacts it and would 401.
+          ctx.processManager.live().map(async (proc) => {
             const client = ctx.processManager.clientFor(proc);
             const health = await client.health().catch((error: unknown) => ({
               healthy: false,
@@ -165,16 +166,20 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
       inputSchema: {
         repoPath: z.string().min(1),
         title: z.string().optional(),
-        parentID: z.string().optional()
+        parentID: z.string().optional(),
+        model: z
+          .string()
+          .optional()
+          .describe("Model as provider/model or provider/model#variant. Defaults to the bridge's configured model.")
       },
       annotations: { readOnlyHint: false, openWorldHint: false }
     },
-    async ({ repoPath, title, parentID }) =>
+    async ({ repoPath, title, parentID, model }) =>
       safeTool(async () => {
         const validated = await validateRepoPath(repoPath, ctx.config.allowedRoots);
         const managed = await ctx.processManager.ensure(validated);
         const client = ctx.processManager.clientFor(managed);
-        const session = await client.createSession(title, parentID);
+        const session = await client.createSession(title, parentID, model ?? ctx.config.opencodeDefaultModel);
         if (!session.id) throw new Error(`opencode returned a session without an id: ${JSON.stringify(session)}`);
         const bridge = await ctx.state.createSession({
           opencodeSessionId: session.id,
@@ -280,7 +285,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         bridgeSessionId: z.string().min(1),
         text: z.string().min(1),
         wait: z.boolean().default(false),
-        timeoutMs: z.number().int().min(1000).max(MAX_WAIT_MS).default(60_000),
+        timeoutMs: z.number().int().min(1000).max(MAX_WAIT_MS).default(45_000),
         delivery: z.enum(["steer", "queue"]).optional()
       },
       annotations: { readOnlyHint: false, openWorldHint: false }

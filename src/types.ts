@@ -10,6 +10,12 @@ export type BridgeConfig = {
   /** Allow `?token=` / path-token auth. Off by default so credentials stay in headers. */
   allowQueryToken: boolean;
   opencodeBaseUrl?: string;
+  /** Path to opencode's service.json (credentials for the running background service). */
+  opencodeServiceConfig: string;
+  /** Use the already-running opencode background service instead of spawning one. */
+  opencodeUseService: boolean;
+  /** Model applied to newly created sessions, as "provider/model" or "provider/model#variant". */
+  opencodeDefaultModel?: string;
   opencodeBin: string;
   opencodeHost: string;
   opencodePortStart: number;

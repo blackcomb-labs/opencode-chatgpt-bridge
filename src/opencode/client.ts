@@ -177,11 +177,37 @@ export class OpencodeClient {
     );
   }
 
-  async createSession(title?: string, parentID?: string): Promise<OpencodeSession> {
+  async createSession(title?: string, parentID?: string, model?: string): Promise<OpencodeSession> {
     const body: Record<string, unknown> = {};
     if (title) body.title = title;
     if (parentID) body.parentID = parentID;
-    return await this.requestData<OpencodeSession>("POST", "/api/session", { body });
+    const session = await this.requestData<OpencodeSession>("POST", "/api/session", { body });
+    if (model && session?.id) {
+      const ref = parseModelRef(model);
+      if (ref) {
+        try {
+          await this.setSessionModel(session.id, ref);
+          return { ...session, model: ref };
+        } catch (error) {
+          // A model that is not available is not fatal: the session still works
+          // with the server default.
+          const detail = error instanceof Error ? error.message : String(error);
+          return { ...session, model: ref, modelError: detail };
+        }
+      }
+    }
+    return session;
+  }
+
+  async setSessionModel(
+    sessionId: string,
+    model: { id: string; providerID: string; variant?: string }
+  ): Promise<unknown> {
+    return await this.requestData(
+      "POST",
+      `/api/session/${encodeURIComponent(sessionId)}/model`,
+      { body: { model } }
+    );
   }
 
   async getSession(sessionId: string): Promise<OpencodeSession> {
@@ -203,13 +229,16 @@ export class OpencodeClient {
    * normalizes to oldest-first so consumers can read transcripts naturally.
    */
   async getMessages(sessionId: string, options: GetMessagesOptions = {}): Promise<MessagesPage> {
+    // The `type` query parameter is not supported by opencode 2.0.x (it answers
+    // 400 InvalidRequestError), so filtering happens client side.
     const page = await this.request<{
       data?: unknown[];
       cursor?: { previous?: string | null; next?: string | null };
     }>("GET", `/api/session/${encodeURIComponent(sessionId)}/message`, {
-      query: { limit: options.limit ?? 100, cursor: options.cursor, type: options.type }
+      query: { limit: options.limit ?? 100, cursor: options.cursor }
     });
-    const messages = (page?.data ?? []).map(normalizeMessage).sort((a, b) => a.createdAt - b.createdAt);
+    let messages = (page?.data ?? []).map(normalizeMessage).sort((a, b) => a.createdAt - b.createdAt);
+    if (options.type) messages = messages.filter((message) => message.type === options.type);
     return { messages, cursor: page?.cursor };
   }
 
@@ -367,6 +396,15 @@ const SENSITIVE_PATH_PREFIXES = [
   ".local/share/opencode/auth.json",
   "library/keychains/"
 ];
+
+/** Parses "provider/model" or "provider/model#variant" into a model ref. */
+export function parseModelRef(value: string): { id: string; providerID: string; variant?: string } | undefined {
+  const [path = "", variant] = value.split("#");
+  const [providerID = "", ...rest] = path.split("/");
+  const id = rest.join("/");
+  if (!providerID || !id) return undefined;
+  return variant ? { id, providerID, variant } : { id, providerID };
+}
 
 /** Rejects traversal and credential paths before they ever reach opencode. */
 export function sanitizeRelativePath(path: string): string {

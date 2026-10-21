@@ -1,0 +1,57 @@
+{
+  "mcpServers": {
+    "opencode_bridge": {
+      "command": "node",
+      "args": [
+        "scripts/mcp-stdio-proxy.mjs"
+      ],
+      "cwd": "../..",
+      "env_vars": [
+        "HOME",
+        "PATH",
+        "OPENCODE_BRIDGE_ROOT"
+      ],
+      "startup_timeout_sec": 45,
+      "tool_timeout_sec": 180,
+      "default_tools_approval_mode": "prompt",
+      "tools": {
+        "bridge_health": {
+          "approval_mode": "approve"
+        },
+        "list_projects": {
+          "approval_mode": "approve"
+        },
+        "opencode_list_sessions": {
+          "approval_mode": "approve"
+        },
+        "opencode_get_session_status": {
+          "approval_mode": "approve"
+        },
+        "opencode_get_messages": {
+          "approval_mode": "approve"
+        },
+        "opencode_get_diff": {
+          "approval_mode": "approve"
+        },
+        "opencode_list_permissions": {
+          "approval_mode": "approve"
+        },
+        "opencode_read_file": {
+          "approval_mode": "approve"
+        },
+        "opencode_find_files": {
+          "approval_mode": "approve"
+        },
+        "opencode_vcs_status": {
+          "approval_mode": "approve"
+        },
+        "opencode_capabilities": {
+          "approval_mode": "approve"
+        },
+        "opencode_wait_for_completion": {
+          "approval_mode": "approve"
+        }
+      }
+    }
+  }
+}

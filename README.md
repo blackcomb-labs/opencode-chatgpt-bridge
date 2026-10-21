@@ -116,53 +116,65 @@ OPENCODE_BRIDGE_ALLOWED_ROOTS=/Users/you/Projects
 OPENCODE_BRIDGE_ALLOWED_ROOTS=/Users/you
 ```
 
-## Connecting the ChatGPT desktop app (recommended: no tunnel)
+## Install as a personal ChatGPT desktop plugin (recommended)
 
-The macOS ChatGPT app shares Codex's MCP configuration (`~/.codex/config.toml`), so it connects to a **local** Streamable HTTP server directly. No public URL, no OAuth, no tunnel.
+The macOS ChatGPT app is built on Codex and shares its plugin system, so the
+bridge can be installed as a personal plugin and shows up in the Plugins
+directory. No tunnel, no OAuth, nothing public.
 
-1. Start the bridge (see [Start / stop](#start--stop)) and confirm:
+```bash
+node scripts/install-codex-plugin.mjs
+```
 
-   ```bash
-   ./scripts/bridge-status.sh
-   curl -s http://127.0.0.1:8787/health
-   ```
+That script:
 
-2. Add the server to `~/.codex/config.toml`. `http_headers_helper` reads the bearer token from the bridge's private `.env`, so the secret never lives in the Codex config:
+1. writes `~/.agents/plugins/marketplace.json` (a personal marketplace),
+2. copies the plugin to `~/.agents/plugins/opencode-bridge/`,
+3. generates `.mcp.json` pointing at this checkout with absolute paths,
+4. records the bridge location in `~/.opencode-chatgpt-bridge/bridge-root`,
+5. registers the marketplace and installs the plugin
+   (`opencode-bridge@personal`, enabled).
 
-   ```toml
-   [mcp_servers.opencode_bridge]
-   url = "http://127.0.0.1:8787/mcp"
-   http_headers_helper = "/absolute/path/to/opencode-chatgpt-bridge-v2/scripts/mcp-headers.sh"
-   startup_timeout_sec = 30
-   tool_timeout_sec = 120
-   default_tools_approval_mode = "prompt"
-   enabled = true
-
-   # Reads are pre-approved; everything else still asks a human.
-   [mcp_servers.opencode_bridge.tools.bridge_health]
-   approval_mode = "approve"
-   # ... repeat for opencode_list_sessions, opencode_get_messages, etc.
-   ```
-
-3. Restart the ChatGPT app so it reloads the config (quit from the menu bar, reopen).
-4. Start a chat and ask: *"Ask my OpenCode agent what it's working on."*
+Then restart ChatGPT and open a chat. The plugin appears as **OpenCode Bridge**
+and exposes the bridge's 19 tools.
 
 | Field | Value |
 |---|---|
-| Name | `opencode_bridge` |
-| Transport | Streamable HTTP |
-| URL | `http://127.0.0.1:8787/mcp` |
-| Authentication | `Authorization: Bearer <OPENCODE_BRIDGE_TOKEN>` via `scripts/mcp-headers.sh` |
-| Approvals | read-only tools pre-approved, write tools prompt every time |
+| Plugin name | `opencode-bridge` (shown as *OpenCode Bridge*) |
+| Marketplace | `personal` (`~/.agents/plugins/marketplace.json`) |
+| MCP server | `opencode_bridge` (stdio) |
+| MCP transport | stdio, launched by the app |
+| Underlying bridge | `http://127.0.0.1:8787/mcp` (Streamable HTTP, loopback only) |
+| Authentication | `Authorization: Bearer <token>` injected by `scripts/mcp-stdio-proxy.mjs` from the bridge's private `.env` |
 
-Verify the config without spending model calls:
+The plugin's MCP server is a thin stdio proxy: it reads the bearer token from
+`.env` (mode `600`), talks to the bridge over loopback HTTP, and forwards every
+request unchanged. The token never appears in a manifest, a URL, a log, or a
+shell command. If the bridge is not running, the proxy starts it automatically.
 
-```bash
-codex mcp get opencode_bridge
-grep '^\[mcp\]' ~/.opencode-chatgpt-bridge/bridge.log | tail
+Uninstall with `node scripts/install-codex-plugin.mjs --uninstall`.
+
+### Approval policy
+
+The plugin's `.mcp.json` marks read-only tools `approve` and leaves everything
+that can change state (`opencode_send_message`, `opencode_attach_session`,
+`opencode_create_session`, `opencode_respond_permission`, `opencode_abort`,
+server start/stop) on `prompt`, so a human confirms every write.
+
+### Alternative: raw MCP entry in `~/.codex/config.toml`
+
+If you do not want a plugin, the same server can be registered directly. The
+plugin route is preferred because it shows up in the Plugins directory.
+
+```toml
+[mcp_servers.opencode_bridge]
+url = "http://127.0.0.1:8787/mcp"
+http_headers_helper = "/absolute/path/to/opencode-chatgpt-bridge-v2/scripts/mcp-headers.sh"
+startup_timeout_sec = 30
+tool_timeout_sec = 180
+default_tools_approval_mode = "prompt"
+enabled = true
 ```
-
-A successful connection logs `initialize` (200), `tools/list` (200) and an SSE `GET` from the app.
 
 ## Connecting ChatGPT web or mobile (tunnel fallback)
 

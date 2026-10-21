@@ -42,7 +42,8 @@ async function connect() {
 }
 
 let client = await connect();
-const call = async (name, args = {}) => payload(await client.callTool({ name, arguments: args }));
+const call = async (name, args = {}) =>
+  payload(await client.callTool({ name, arguments: args }, undefined, { timeout: 300_000 }));
 
 try {
   const tools = await client.listTools();
@@ -50,6 +51,11 @@ try {
 
   const health = await call("bridge_health");
   check("bridge_health", health.ok === true && health.opencodeApi === "v2");
+  check(
+    "managed opencode servers report healthy (regression: redacted password)",
+    health.managedProcesses.every((proc) => proc.health?.healthy === true),
+    JSON.stringify(health.managedProcesses)
+  );
 
   // Read-only against the user's real sessions.
   const listed = await call("opencode_list_sessions", { limit: 10 });
