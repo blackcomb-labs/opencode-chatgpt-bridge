@@ -16,7 +16,7 @@ function json(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
-const MAX_WAIT_MS = 120_000;
+const MAX_WAIT_MS = 300_000;
 
 export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
   const server = new McpServer(
@@ -365,7 +365,10 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         if (sinceMessageId) {
           const index = messages.findIndex((message) => message.id === sinceMessageId);
           matchedSince = index >= 0;
-          if (index >= 0) messages = messages.slice(index + 1);
+          // A cursor that is not in the window must NOT degrade into "here is
+          // the whole transcript": callers would read old messages as new
+          // ones. Return nothing and let the caller decide.
+          messages = index >= 0 ? messages.slice(index + 1) : [];
         }
 
         return {
