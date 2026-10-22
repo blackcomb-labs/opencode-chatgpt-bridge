@@ -46,7 +46,7 @@ export type WaitOptions = {
 
 type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
-type Query = Record<string, string | number | boolean | undefined | null>;
+type Query = Record<string, string | number | boolean | undefined | null | Record<string, string | number | boolean | undefined | null>>;
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -98,6 +98,14 @@ export class OpencodeClient {
     if (query) {
       for (const [key, value] of Object.entries(query)) {
         if (value === undefined || value === null || value === "") continue;
+        if (typeof value === "object") {
+          // OpenAPI deepObject query parameters, e.g. location[directory].
+          for (const [childKey, childValue] of Object.entries(value)) {
+            if (childValue === undefined || childValue === null || childValue === "") continue;
+            url.searchParams.set(`${key}[${childKey}]`, String(childValue));
+          }
+          continue;
+        }
         url.searchParams.set(key, String(value));
       }
     }
@@ -345,19 +353,47 @@ export class OpencodeClient {
   async readFile(path: string, location?: string): Promise<string> {
     const relative = sanitizeRelativePath(path);
     const encoded = relative.split("/").map(encodeURIComponent).join("/");
-    return await this.request<string>("GET", `/api/fs/read/${encoded}`, { query: { location } });
+    const url = this.buildUrl(`/api/fs/read/${encoded}`, {
+      location: location ? { directory: location } : undefined
+    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "GET",
+        headers: this.headers({ Accept: "*/*" }),
+        signal: AbortSignal.timeout(this.timeoutMs)
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new Error(`opencode GET /api/fs/read timed out after ${this.timeoutMs}ms`);
+      }
+      throw error;
+    }
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new OpencodeHttpError(response.status, "GET", "/api/fs/read", body.slice(0, 400));
+    }
+    // File content is opaque: never JSON-parse it even when content-type says JSON.
+    return await response.text();
   }
 
   async findFiles(query: string, options: { limit?: number; type?: "file" | "directory"; location?: string } = {}): Promise<Array<{ path: string; type?: string }>> {
     return (
       (await this.requestData<Array<{ path: string; type?: string }>>("GET", "/api/fs/find", {
-        query: { query, limit: options.limit ?? 50, type: options.type, location: options.location }
+        query: {
+          query,
+          limit: options.limit ?? 50,
+          type: options.type,
+          location: options.location ? { directory: options.location } : undefined
+        }
       })) ?? []
     );
   }
 
   async vcsStatus(location?: string): Promise<unknown[]> {
-    return (await this.requestData<unknown[]>("GET", "/api/vcs/status", { query: { location } })) ?? [];
+    return (await this.requestData<unknown[]>("GET", "/api/vcs/status", {
+      query: { location: location ? { directory: location } : undefined }
+    })) ?? [];
   }
 
   async listAgents(): Promise<unknown[]> {
@@ -408,16 +444,40 @@ export function parseModelRef(value: string): { id: string; providerID: string; 
 
 /** Rejects traversal and credential paths before they ever reach opencode. */
 export function sanitizeRelativePath(path: string): string {
-  const trimmed = path.replace(/^\.\/+/, "").replace(/^\/+/, "");
+  const normalized = path.replace(/\\/g, "/");
+  const trimmed = normalized.replace(/^\.\/+/, "");
   const segments = trimmed.split("/");
-  if (!trimmed || segments.some((segment) => segment === "..")) {
+  if (
+    !trimmed ||
+    trimmed.includes("\0") ||
+    trimmed.startsWith("/") ||
+    /^[a-zA-Z]:/.test(trimmed) ||
+    segments.some((segment) => segment === "..")
+  ) {
     throw new Error(`Refusing to read a path outside the project: ${path}`);
   }
-  const normalized = trimmed.toLowerCase().replace(/^\.\//, "");
+  const normalizedLower = trimmed.toLowerCase().replace(/^\.\//, "");
   const sensitive = SENSITIVE_PATH_PREFIXES.some(
-    (prefix) => normalized === prefix.replace(/\/$/, "") || normalized.startsWith(prefix)
+    (prefix) => normalizedLower === prefix.replace(/\/$/, "") || normalizedLower.startsWith(prefix)
   );
-  if (sensitive) {
+  // A project root may contain credentials even when it is not a home folder.
+  // Check every path component, not only the root-relative prefix.
+  const privateFile = normalizedLower.split("/").some((part) =>
+    part === ".env" ||
+    (part.startsWith(".env.") && part !== ".env.example") ||
+    part === ".npmrc" ||
+    part === ".pypirc" ||
+    part === "service.json" ||
+    part === "opencode.json" ||
+    part === "opencode.jsonc" ||
+    part === "auth.json" ||
+    part === "mcp_token.txt" ||
+    part === "ghidra_mcp_token.txt" ||
+    part === "owner_passphrase.txt" ||
+    part.endsWith(".pem") ||
+    part.endsWith(".key")
+  );
+  if (sensitive || privateFile) {
     throw new Error(`Refusing to read a credential path: ${path}`);
   }
   return trimmed;

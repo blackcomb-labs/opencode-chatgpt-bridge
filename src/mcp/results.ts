@@ -8,7 +8,7 @@ export function toolResult<T extends JsonValue>(structuredContent: T): ToolResul
 }
 
 export function errorResult(message: string): ToolResult<{ ok: false; error: string }> {
-  return toolResult({ ok: false, error: message });
+  return { ...toolResult({ ok: false, error: message }), isError: true };
 }
 
 export async function safeTool<T extends JsonValue>(fn: () => Promise<T>): Promise<ToolResult<T | { ok: false; error: string }>> {

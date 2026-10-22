@@ -30,6 +30,19 @@ export function isPathWithinRoots(candidate: string, allowedRoots: string[]): bo
   return allowedRoots.some((root) => isInside(resolve(root), resolve(candidate)));
 }
 
+/**
+ * Resolve a path below a real root and reject symlink/junction escapes.
+ * The target must already exist; callers that list files should skip failures.
+ */
+export async function resolvePathWithinRoot(root: string, candidate: string): Promise<string> {
+  const rootReal = await realpath(resolve(root));
+  const targetReal = await realpath(resolve(rootReal, candidate));
+  if (!isInside(rootReal, targetReal)) {
+    throw new Error(`Path is outside the project: ${candidate}`);
+  }
+  return targetReal;
+}
+
 export async function validateRepoPath(repoPath: string, allowedRoots: string[]): Promise<string> {
   const resolvedRepo = await resolveExistingPath(resolve(repoPath));
   await assertDirectory(resolvedRepo);

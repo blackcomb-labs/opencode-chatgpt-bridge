@@ -6,6 +6,10 @@ export type BridgeConfig = {
   autoPort: boolean;
   allowedHosts: string[];
   allowedRoots: string[];
+  /** Expose only the explicit read-only tool allowlist. Enabled by default. */
+  readOnly: boolean;
+  /** Opt in to sending prompts to already-attached sessions while keeping other write tools disabled. */
+  allowSendMessage: boolean;
   bridgeToken?: string;
   /** Allow `?token=` / path-token auth. Off by default so credentials stay in headers. */
   allowQueryToken: boolean;
@@ -104,4 +108,5 @@ export type OpencodeDiff = Record<string, unknown>;
 export type ToolResult<T extends JsonValue = JsonValue> = {
   structuredContent: T;
   content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
 };

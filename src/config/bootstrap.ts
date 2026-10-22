@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { access, chmod, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import process from "node:process";
+import { joinPathList } from "./pathList.js";
 
 export type InitOptions = {
   envPath?: string;
@@ -26,7 +28,7 @@ export async function initEnv(options: InitOptions = {}): Promise<{ path: string
     `OPENCODE_BRIDGE_TOKEN=${token}`,
     "# Headers only by default. Enable only if a client cannot send an Authorization header.",
     "OPENCODE_BRIDGE_ALLOW_QUERY_TOKEN=false",
-    `OPENCODE_BRIDGE_ALLOWED_ROOTS=${allowedRoots.map((root) => resolve(root)).join(":")}`,
+    `OPENCODE_BRIDGE_ALLOWED_ROOTS=${joinPathList(allowedRoots)}`,
     "OPENCODE_BIN=opencode",
     "OPENCODE_BRIDGE_OPENCODE_HOST=127.0.0.1",
     "OPENCODE_BRIDGE_OPENCODE_PORT_START=4096",
