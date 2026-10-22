@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { BridgeConfig, JsonValue } from "../types.js";
-import { isPathWithinRoots, listProjects, validateRepoPath } from "../security/paths.js";
+import { isPathWithinRoots, listProjects, resolvePathWithinRoot, validateRepoPath } from "../security/paths.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
+import { sanitizeRelativePath } from "../opencode/client.js";
 import { SessionRegistry } from "../opencode/registry.js";
 import { buildSessionReport, isAllowed, resolveSession } from "../opencode/report.js";
 import { StateStore } from "../state/store.js";
@@ -19,6 +20,44 @@ function json(value: unknown): JsonValue {
 }
 
 const MAX_WAIT_MS = 300_000;
+
+/**
+ * Explicit read-only surface. This is the allowlist used to prune tools/list
+ * and reject tools/call when readOnly is enabled. Unknown names fail closed.
+ */
+export const READ_ONLY_TOOL_NAMES = new Set([
+  "bridge_health",
+  "list_projects",
+  "opencode_list_sessions",
+  "opencode_attach_session",
+  "opencode_get_session_status",
+  "opencode_wait_for_completion",
+  "opencode_get_messages",
+  "opencode_get_diff",
+  "opencode_list_permissions",
+  "opencode_read_file",
+  "opencode_find_files",
+  "opencode_vcs_status"
+]);
+
+const WRITE_TOOL_NAMES = [
+  "opencode_start",
+  "opencode_stop",
+  "opencode_create_session",
+  "opencode_send_message",
+  "opencode_abort",
+  "opencode_respond_permission"
+] as const;
+
+export function isReadOnlyTool(name: string): boolean {
+  return READ_ONLY_TOOL_NAMES.has(name) && !WRITE_TOOL_NAMES.includes(name as (typeof WRITE_TOOL_NAMES)[number]);
+}
+
+/** Permit exactly one mutating MCP tool in send-only mode. Defaults remain fail closed. */
+export function isExposedTool(name: string, policy: Pick<BridgeConfig, "readOnly" | "allowSendMessage">): boolean {
+  if (!policy.readOnly) return true; // Legacy full-access mode requires a separate explicit opt-out.
+  return isReadOnlyTool(name) || (policy.allowSendMessage && name === "opencode_send_message");
+}
 
 export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
   const server = new McpServer(
@@ -63,6 +102,8 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
           ok: true,
           bridgeVersion: "0.2.0",
           opencodeApi: "v2",
+          readOnly: ctx.config.readOnly,
+          sendMessageEnabled: !ctx.config.readOnly || ctx.config.allowSendMessage,
           allowedRoots: ctx.config.allowedRoots,
           opencodeBaseUrl: ctx.config.opencodeBaseUrl ?? null,
           managedProcesses: processes,
@@ -294,9 +335,20 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     },
     async (input) =>
       safeTool(async () => {
+        if (ctx.config.readOnly && !ctx.config.allowSendMessage) {
+          throw new Error("Message sending is disabled by bridge policy");
+        }
         const bridge = await ctx.state.getSession(input.bridgeSessionId);
-        const managed = await ctx.processManager.ensure(bridge.repoPath);
+        // Stored mappings can outlive allowed-roots changes. Revalidate on every send.
+        const validatedRepo = await validateRepoPath(bridge.repoPath, ctx.config.allowedRoots);
+        const managed = await ctx.processManager.ensure(validatedRepo);
         const client = ctx.processManager.clientFor(managed);
+        // Do not send into a missing, moved, or differently located session.
+        const liveSession = await client.getSession(bridge.opencodeSessionId);
+        const liveDir = liveSession.location?.directory;
+        if (!liveDir || (await validateRepoPath(liveDir, ctx.config.allowedRoots)) !== validatedRepo) {
+          throw new Error("Session location no longer matches the attached project");
+        }
         const since = Date.now();
         const accepted = await client.prompt(bridge.opencodeSessionId, input.text, { delivery: input.delivery });
         await ctx.state.updateSession(input.bridgeSessionId, {});
@@ -482,10 +534,12 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     async ({ bridgeSessionId, path }) =>
       safeTool(async () => {
         const bridge = await ctx.state.getSession(bridgeSessionId);
+        const relative = sanitizeRelativePath(path);
+        await resolvePathWithinRoot(bridge.repoPath, relative);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        const content = await client.readFile(path);
-        return { path, bytes: content.length, content };
+        const content = await client.readFile(relative, bridge.repoPath);
+        return { path: relative, bytes: content.length, content };
       })
   );
 
@@ -507,7 +561,17 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        return { files: json(await client.findFiles(query, { limit, type })) };
+        const files = await client.findFiles(query, { limit, type, location: bridge.repoPath });
+        const safeFiles: typeof files = [];
+        for (const file of files) {
+          try {
+            await resolvePathWithinRoot(bridge.repoPath, file.path);
+            safeFiles.push(file);
+          } catch {
+            // Drop symlink/junction escapes and vanished entries.
+          }
+        }
+        return { files: json(safeFiles) };
       })
   );
 
@@ -524,7 +588,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        const files = await client.vcsStatus();
+        const files = await client.vcsStatus(bridge.repoPath);
         return { files: files.length, status: json(files) };
       })
   );
@@ -533,7 +597,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     "opencode_capabilities",
     {
       title: "List opencode capabilities",
-      description: "List agents, slash commands, providers, and effective config available to opencode for a session.",
+      description: "List non-sensitive agent and command names. Provider configuration and credentials are not returned.",
       inputSchema: { bridgeSessionId: z.string().min(1) },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -542,13 +606,27 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         const bridge = await ctx.state.getSession(bridgeSessionId);
         const managed = await ctx.processManager.ensure(bridge.repoPath);
         const client = ctx.processManager.clientFor(managed);
-        const [agents, commands, providers, config] = await Promise.all([
+        // Never send raw provider/config objects to an MCP client: these can
+        // contain API keys, Authorization headers and provider-specific secrets.
+        const [agents, commands] = await Promise.all([
           client.listAgents(),
-          client.listCommands(),
-          client.listProviders(),
-          client.getConfig()
+          client.listCommands()
         ]);
-        return { agents: json(agents), commands: json(commands), providers: json(providers), config: json(config) };
+        const namesOnly = (items: unknown): string[] => {
+          if (!Array.isArray(items)) return [];
+          return items.flatMap((item: unknown) => {
+            if (!item || typeof item !== "object") return [];
+            const name = (item as Record<string, unknown>).name;
+            return typeof name === "string" && /^[A-Za-z0-9._/@ -]{1,96}$/.test(name)
+              ? [name]
+              : [];
+          });
+        };
+        return {
+          agents: namesOnly(agents),
+          commands: namesOnly(commands),
+          providerConfigurationOmitted: true
+        };
       })
   );
 
@@ -683,6 +761,13 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
   // it from tools/list for maximum Apps SDK compatibility.
   const registeredTools = (server as unknown as { _registeredTools?: Record<string, { execution?: unknown }> })._registeredTools;
   if (registeredTools) {
+    if (ctx.config.readOnly) {
+      // Deleting from the registry feeds both tools/list and tools/call: denied
+      // tools are not advertised and unknown names are rejected by the SDK.
+      for (const name of Object.keys(registeredTools)) {
+        if (!isExposedTool(name, ctx.config)) delete registeredTools[name];
+      }
+    }
     for (const tool of Object.values(registeredTools)) {
       tool.execution = undefined;
     }

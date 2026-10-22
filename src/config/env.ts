@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 import dotenv from "dotenv";
 import type { BridgeConfig } from "../types.js";
+import { splitPathList } from "./pathList.js";
 
 dotenv.config({ quiet: true });
 
@@ -57,15 +58,16 @@ function pickNumber(args: CliArgs, key: string, envKey: string, fallback: number
 }
 
 function parseList(value: string | undefined, fallback: string[]): string[] {
- const raw = value?.trim();
- const items = raw ? raw.split(",") : fallback;
- return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
+  const raw = value?.trim();
+  const items = raw ? raw.split(",") : fallback;
+  return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
 }
 
 function parseAllowedRoots(value?: string): string[] {
-  const raw = value?.trim();
-  const roots = raw ? raw.split(":") : [process.cwd()];
-  return [...new Set(roots.map((root) => resolve(root)).filter(Boolean))];
+  // Windows path lists use `;`, Unix uses `:`. Splitting on a hardcoded `:`
+  // would turn `C:\repos` into `C` and `\repos`.
+  const roots = splitPathList(value);
+  return roots.length > 0 ? roots : [resolve(process.cwd())];
 }
 
 export function loadConfig(argv = process.argv.slice(2)): BridgeConfig {
@@ -80,6 +82,10 @@ export function loadConfig(argv = process.argv.slice(2)): BridgeConfig {
     autoPort: pickBoolean(args, "auto-port", "OPENCODE_BRIDGE_AUTO_PORT", true),
     allowedHosts: parseList(pick(args, "allowed-hosts", "OPENCODE_BRIDGE_ALLOWED_HOSTS"), ["127.0.0.1", "localhost"]),
     allowedRoots,
+    // Fail safe: the bridge is read-only unless an operator explicitly opts in.
+    readOnly: pickBoolean(args, "read-only", "OPENCODE_BRIDGE_READ_ONLY", true),
+    // Single write capability, off unless explicitly enabled by the operator.
+    allowSendMessage: pickBoolean(args, "allow-send-message", "OPENCODE_BRIDGE_ALLOW_SEND_MESSAGE", false),
     bridgeToken: pick(args, "token", "OPENCODE_BRIDGE_TOKEN"),
     allowQueryToken: pickBoolean(args, "allow-query-token", "OPENCODE_BRIDGE_ALLOW_QUERY_TOKEN", false),
     opencodeBaseUrl: pick(args, "opencode-url", "OPENCODE_BASE_URL"),

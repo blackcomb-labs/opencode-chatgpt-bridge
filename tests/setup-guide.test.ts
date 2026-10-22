@@ -8,6 +8,7 @@ const config: BridgeConfig = {
   autoPort: true,
   allowedHosts: ["127.0.0.1", "localhost"],
   allowedRoots: ["/tmp/repos"],
+  readOnly: true,
   bridgeToken: "abc123supersecrettoken",
   allowQueryToken: false,
   opencodeBin: "opencode",

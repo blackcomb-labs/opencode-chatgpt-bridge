@@ -91,9 +91,22 @@ describe("OpencodeClient v2", () => {
     await client.readFile("docs/a b.md");
     expect(calls[0]).toBe("http://localhost:4096/api/fs/read/docs/a%20b.md");
 
+    const jsonCalls: string[] = [];
+    const jsonFetch: typeof fetch = async (url) => {
+      jsonCalls.push(String(url));
+      return new Response('{"name":"stage4"}', { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const jsonClient = new OpencodeClient({ baseUrl: "http://localhost:4096", fetchImpl: jsonFetch });
+    await expect(jsonClient.readFile("package.json", "/repo")).resolves.toBe('{"name":"stage4"}');
+    expect(new URL(jsonCalls[0] ?? "").searchParams.get("location[directory]")).toBe("/repo");
+
     expect(() => sanitizeRelativePath("../../etc/passwd")).toThrow(/outside the project/);
     expect(() => sanitizeRelativePath("/../etc/passwd")).toThrow(/outside the project/);
+    expect(() => sanitizeRelativePath("/etc/passwd")).toThrow(/outside the project/);
+    expect(() => sanitizeRelativePath("..\\..\\Windows\\win.ini")).toThrow(/outside the project/);
+    expect(() => sanitizeRelativePath("C:\\Windows\\win.ini")).toThrow(/outside the project/);
     expect(sanitizeRelativePath("./src/index.ts")).toBe("src/index.ts");
+    expect(sanitizeRelativePath("src\\index.ts")).toBe("src/index.ts");
     expect(() => sanitizeRelativePath(".ssh/id_rsa")).toThrow(/credential path/);
     expect(() => sanitizeRelativePath("Library/Keychains/login.keychain-db")).toThrow(/credential path/);
     expect(sanitizeRelativePath("src/.env.example")).toBe("src/.env.example");

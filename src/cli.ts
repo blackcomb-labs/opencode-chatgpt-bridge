@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { delimiter } from "node:path";
 import process from "node:process";
 import { execPath } from "node:process";
 import { loadConfig } from "./config/env.js";
 import { initEnv } from "./config/bootstrap.js";
+import { splitPathList } from "./config/pathList.js";
 import { createRuntime, startHttpServer } from "./server/http.js";
 import { checkOpencodeCli } from "./opencode/setup.js";
 import { getSetupGuide } from "./setupGuide.js";
@@ -28,7 +30,7 @@ function printHelp(): void {
   console.log(`opencode-chatgpt-bridge
 
 Usage:
-  opencode-chatgpt-bridge init [--allowed-roots <path:path>]
+  opencode-chatgpt-bridge init [--allowed-roots <paths>]
   opencode-chatgpt-bridge start [options]
   opencode-chatgpt-bridge doctor [options]
   opencode-chatgpt-bridge install-service
@@ -38,7 +40,8 @@ Usage:
 Common options:
   --host <host>                  Bridge host, default 127.0.0.1
   --port <port>                  Bridge port, default 8787
-  --allowed-roots <path:path>    Colon-separated repo roots ChatGPT may access
+  --allowed-roots <paths>        Repo roots separated by '${delimiter}' on this OS
+  --read-only[=false]            Expose only read-only tools (default: true)
   --token <token>                Bearer token for /mcp
   --tunnel cloudflare|tailscale|none
                                   Start Cloudflare quick tunnel or Tailscale Funnel
@@ -78,7 +81,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "init") {
-    const roots = getArgValue("--allowed-roots")?.split(":").filter(Boolean);
+    const roots = splitPathList(getArgValue("--allowed-roots"));
     const result = await initEnv({ allowedRoots: roots, force: hasFlag("--force") });
     if (result.created) {
       console.log(`Created ${result.path}`);

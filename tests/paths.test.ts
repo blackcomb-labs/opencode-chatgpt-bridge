@@ -1,8 +1,8 @@
-import { mkdtemp, mkdir, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isPathWithinRoots, listProjects, validateRepoPath } from "../src/security/paths.js";
+import { isPathWithinRoots, listProjects, resolvePathWithinRoot, validateRepoPath } from "../src/security/paths.js";
 
 describe("path security", () => {
   it("allows paths inside allowed roots", async () => {
@@ -29,5 +29,18 @@ describe("path security", () => {
     expect(isPathWithinRoots("/Users/me/dev/repo", ["/Users/me/dev"])).toBe(true);
     expect(isPathWithinRoots("/Users/me/other/repo", ["/Users/me/dev"])).toBe(false);
     expect(isPathWithinRoots("/Users/me/dev-evil/repo", ["/Users/me/dev"])).toBe(false);
+  });
+
+  it("rejects symlink and junction escapes from the project root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-root-"));
+    const repo = join(root, "repo");
+    const outside = await mkdtemp(join(tmpdir(), "bridge-outside-"));
+    await mkdir(repo, { recursive: true });
+    await writeFile(join(repo, "inside.txt"), "ok", "utf8");
+    await writeFile(join(outside, "secret.txt"), "no", "utf8");
+    await symlink(outside, join(repo, "escape"), process.platform === "win32" ? "junction" : "dir");
+
+    await expect(resolvePathWithinRoot(repo, "inside.txt")).resolves.toContain("inside.txt");
+    await expect(resolvePathWithinRoot(repo, "escape/secret.txt")).rejects.toThrow(/outside the project/);
   });
 });

@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+import process from "node:process";
 import { describe, expect, it } from "vitest";
 import { initEnv } from "../src/config/bootstrap.js";
 
@@ -18,6 +19,23 @@ describe("initEnv", () => {
     expect(content).toContain("OPENCODE_BRIDGE_TUNNEL=none");
     expect(content).toContain("OPENCODE_BRIDGE_ALLOW_QUERY_TOKEN=false");
     expect(content).toContain(dir);
-    expect(mode).toBe(0o600);
+
+    // `chmod 600` is only meaningful on Unix. Node cannot apply an NTFS ACL on
+    // Windows (it only toggles the read-only attribute), and the bridge does
+    // not implement ACL hardening yet, so Windows must not be reported as
+    // protected here.
+    if (process.platform !== "win32") {
+      expect(mode).toBe(0o600);
+    }
+  });
+
+  it("joins allowed roots with the platform path delimiter", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bridge-init-"));
+    const second = await mkdtemp(join(tmpdir(), "bridge-init-"));
+    const envPath = join(dir, ".env");
+    await initEnv({ envPath, allowedRoots: [dir, second] });
+    const content = await readFile(envPath, "utf8");
+
+    expect(content).toContain(`OPENCODE_BRIDGE_ALLOWED_ROOTS=${dir}${delimiter}${second}`);
   });
 });

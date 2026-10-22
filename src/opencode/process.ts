@@ -78,6 +78,14 @@ export class OpencodeProcessManager {
     const existing = this.processes.get(repoPath);
     if (existing && (await this.isHealthy(existing))) return existing;
 
+    // Read-only mode must never start a new opencode server as a side effect of
+    // listing or reading. Fail closed instead of spawning a second instance.
+    if (this.config.readOnly) {
+      throw new Error(
+        `Read-only mode: no reusable opencode service for ${repoPath}; refusing to start a new server.`
+      );
+    }
+
     const port = await findOpenPort(this.config.opencodePortStart);
     const password = this.config.opencodePassword ?? randomBytes(24).toString("hex");
     const baseUrl = `http://${this.config.opencodeHost}:${port}`;
